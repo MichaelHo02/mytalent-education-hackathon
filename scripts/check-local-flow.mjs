@@ -4,9 +4,9 @@ if(!['127.0.0.1','localhost'].includes(new URL(base).hostname))throw new Error('
 const owner=`qa-${crypto.randomUUID()}`;
 const identity={'oai-authenticated-user-id':owner,'oai-authenticated-user-email':'qa@sites.test'};
 async function request(path,method='GET',body,auth=identity){const r=await fetch(base+path,{method,headers:{...auth,...(body&&!(body instanceof FormData)?{'content-type':'application/json'}:{})},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});return {r,data:r.headers.get('content-type')?.includes('application/json')?await r.json():await r.text()};}
-const unauth=await request('/api/workspace','GET',undefined,{});assert.equal(unauth.r.status,401);
-const empty=await request('/api/workspace');assert.deepEqual(empty.data.state.tests,[]);
-const created=await request('/api/tests','POST',{title:'QA-only method marks',guideText:'Q1: f(x)=x²; f\'(x)=2x. Award 1 for method, 1 for result. Q2: solve 2x=6; x=3. One mark.',questions:[{id:'Q1',topic:'Derivative',maxMarks:2,criteria:'1 method + 1 result'},{id:'Q2',topic:'Equation',maxMarks:1,criteria:'x=3'}]});assert.equal(created.r.status,201);const test=created.data.state.tests[0];
+const unauth=await request('/api/workspace','GET',undefined,{});assert.equal(unauth.r.status,200);assert.ok(unauth.r.headers.get('set-cookie')?.includes('HttpOnly'));
+const empty=await request('/api/workspace');assert.equal(empty.data.state.submissions.length,0);
+const created=await request('/api/tests','POST',{title:'QA-only method marks',guideText:'Q1: f(x)=x²; f\'(x)=2x. Award 1 for method, 1 for result. Q2: solve 2x=6; x=3. One mark.',questions:[{id:'Q1',topic:'Derivative',maxMarks:2,criteria:'1 method + 1 result'},{id:'Q2',topic:'Equation',maxMarks:1,criteria:'x=3'}]});assert.equal(created.r.status,201);const test=created.data.state.tests.find(t=>t.title==='QA-only method marks');
 const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 const form=new FormData();form.append('testId',test.id);form.append('studentName','QA synthetic record');form.append('date','2026-10-13');form.append('files',new Blob([Buffer.from(png,'base64')],{type:'image/png'}),'qa-fixture.png');
 const uploaded=await request('/api/submissions','POST',form);assert.equal(uploaded.r.status,201);let s=uploaded.data.submission;

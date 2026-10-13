@@ -3,9 +3,11 @@ name: tutor-workflow
 description: Mark photographed paper tests against a tutor-supplied marking guide, save drafts for review, maintain tutor records, and prepare evidence-based student, parent and manager conversation briefs.
 ---
 
-# Tutor Workspace
+# MyTalent Education
 
-Use the Tutor Workspace tools for the tutor's paper-test and administration workflow. Students complete tests on paper. The tutor supplies a question paper and worked solutions with marking rules.
+Use the MyTalent Education tools for the tutor's paper-test and administration workflow. Students complete tests on paper. The tutor supplies a question paper and worked solutions with marking rules. The sidebar's primary buttons start this workflow by sending a request into the host conversation; save results through the tools so the sidebar refreshes.
+
+For Upload and mark with Codex, guide the tutor to attach every paper page, confirm the student alias and date, and select the matching saved guide. If the guide is missing, request the question paper and official worked solutions, then save a verified rubric with create_test. Register current attachments with create_chat_submission; filenames are references rather than an archive. If the host supports bounded subagents, delegation may help with marking or drafting, but the main agent must verify tool results and save the draft. Do not claim a button directly spawns a subagent or that a separate AI API ran.
 
 ## Marking
 

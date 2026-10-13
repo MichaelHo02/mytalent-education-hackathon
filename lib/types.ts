@@ -1,5 +1,5 @@
 export type Question = { id: string; topic: string; maxMarks: number; criteria: string };
-export type Test = { id: string; title: string; guideText: string; questions: Question[]; createdAt: string };
+export type Test = { id: string; title: string; guideText: string; questions: Question[]; markIncrement?: number; createdAt: string };
 export type MarkStatus = "correct" | "wrong" | "careless" | "blank" | "review";
 export type QuestionMark = { questionId: string; awardedMarks: number | null; status: MarkStatus; evidence: string; reason: string; tutorNote: string };
 export type SubmissionFile = { id: string; name: string; mimeType: string; size: number };
@@ -12,7 +12,7 @@ export type WorkspaceState = { tests: Test[]; submissions: Submission[]; activit
 export type StudentBrief = { submissionId: string; studentName: string; testTitle: string; date: string; score: number; maxScore: number; strengths: string[]; nextSteps: string[]; evidence: string[]; parentTalkingPoints: string[] };
 export type WorkspaceBriefs = { student: StudentBrief[]; manager: { date: string; papersMarked: number; marksReviewed: number; activities: Record<ActivityType, number>; followups: string[]; talkingPoints: string[] } };
 export type ExportKind = "marking" | "progress" | "exams" | "daily";
-export type CreateTestInput = Pick<Test, "title" | "guideText" | "questions">;
+export type CreateTestInput = Pick<Test, "title" | "guideText" | "questions" | "markIncrement">;
 export type CreateSubmissionInput = Pick<Submission, "testId" | "studentName" | "date" | "files">;
 export type CreateActivityInput = Omit<Activity, "id">;
 export type CreateFollowupInput = Omit<Followup, "id" | "done">;

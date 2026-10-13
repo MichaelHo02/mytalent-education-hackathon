@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { approveMarking, draftMarking, emptyWorkspace, makeActivity, makeChatSubmission, makeFollowup, makeSavedBrief, makeSubmission, makeTest, WorkspaceError } from "./domain";
 import type { CreateSubmissionInput, SubmissionFile, WorkspaceState } from "./types";
+import { withOfficialReference } from "./reference-materials";
 
 function ownerKey(ownerId: string): string {
   if (!ownerId || typeof ownerId !== "string" || ownerId.length > 256) throw new WorkspaceError("Sign in to access your workspace.", 401);
@@ -15,13 +16,13 @@ async function readRow(ownerId: string): Promise<WorkspaceRow | null> {
   return database().prepare("SELECT payload, version FROM workspace_states WHERE owner_id = ?").bind(ownerKey(ownerId)).first<WorkspaceRow>();
 }
 export async function readWorkspace(ownerId: string): Promise<WorkspaceState> {
-  const row = await readRow(ownerId); return row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace();
+  const row = await readRow(ownerId); return withOfficialReference(row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace());
 }
 /** Updater must be synchronous and free of side effects: a conflicting write is retried. */
 export async function mutateWorkspace(ownerId: string, updater: (state: WorkspaceState) => WorkspaceState): Promise<WorkspaceState> {
   const key = ownerKey(ownerId);
   for (let attempt = 0; attempt < 5; attempt++) {
-    const row = await readRow(key); const state = row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace();
+    const row = await readRow(key); const state = withOfficialReference(row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace());
     const next = updater(state); const payload = JSON.stringify(next);
     // Leave room for the owner key and other fields within D1's 2 MB row limit.
     if (new TextEncoder().encode(payload).byteLength > 1_800_000) throw new WorkspaceError("This prototype workspace has reached its record limit. Export existing records; additional capacity needs a database upgrade.", 413);
@@ -102,16 +103,4 @@ export async function getFile(ownerId: string, id: string): Promise<{ object: R2
   const stored = await bucket().get(fileKey(ownerId, id));
   if (!stored) throw new WorkspaceError("File not found in storage.", 404);
   return { object: stored, metadata };
-}
-export async function seedDemo(ownerId: string): Promise<WorkspaceState> {
-  const now = new Date().toISOString(); const date = new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Melbourne" }).format(new Date());
-  const test = makeTest({ title: "Fictional demo — Functions checkpoint", guideText: "Fictional sample only. Q1: For f(x)=x², f'(x)=2x. Award 1 mark for power rule, 1 for correct derivative. Q2: Solve 2x+4=10. Award 1 mark for subtracting 4, 1 for dividing by 2 to get x=3. Q3: Evaluate f(2) for f(x)=x². Award 1 mark for substitution and 1 for result 4.", questions: [{ id: "Q1", topic: "Differentiation", maxMarks: 2, criteria: "1 mark for power rule, 1 for 2x." }, { id: "Q2", topic: "Linear equations", maxMarks: 2, criteria: "1 mark for 2x=6, 1 for x=3." }, { id: "Q3", topic: "Substitution", maxMarks: 2, criteria: "1 mark for substituting 2, 1 for result 4." }] }, crypto.randomUUID(), now);
-  const submission = { id: crypto.randomUUID(), testId: test.id, studentName: "Alex (fictional demo)", date, status: "approved" as const, questions: [{ questionId: "Q1", awardedMarks: 2, status: "correct" as const, evidence: "Synthetic example: student writes f'(x)=2x.", reason: "Power rule and correct derivative shown.", tutorNote: "" }, { questionId: "Q2", awardedMarks: 1, status: "wrong" as const, evidence: "Synthetic example: student writes 2x=6, then x=6.", reason: "Subtraction step correct; division by 2 missing.", tutorNote: "Practise isolating x after subtracting the constant." }, { questionId: "Q3", awardedMarks: 0, status: "blank" as const, evidence: "Synthetic example: answer space is empty.", reason: "Not attempted.", tutorNote: "Attempt substitution with tutor support." }], files: [], revision: 1, createdAt: now, approvedAt: now };
-  const draftSubmission = { id: crypto.randomUUID(), testId: test.id, studentName: "Sam (fictional demo)", date, status: "draft" as const, questions: [{ questionId: "Q1", awardedMarks: 2, status: "correct" as const, evidence: "Synthetic example only: student writes f'(x)=2x.", reason: "Power rule and correct derivative shown in this fictional example.", tutorNote: "" }, { questionId: "Q2", awardedMarks: 1, status: "wrong" as const, evidence: "Synthetic example only: student writes 2x=6, then x=6.", reason: "Subtraction step earns one mark; final division is missing in this fictional example.", tutorNote: "Practise dividing both sides by the coefficient." }, { questionId: "Q3", awardedMarks: null, status: "review" as const, evidence: "Synthetic example only: student writes f(2)=2²=4. No original photo is attached.", reason: "This fictional row is deliberately unresolved to demonstrate tutor review. The guide awards one mark for substitution and one for the result 4.", tutorNote: "Resolve the result and marks, save the draft, then approve to test the review flow." }], files: [], revision: 1, createdAt: now };
-  const activity = { id: crypto.randomUUID(), date, type: "qa" as const, studentName: "Alex (fictional demo)", count: 1, notes: "Fictional demo Q&A on solving equations." };
-  const followup = { id: crypto.randomUUID(), studentName: "Alex (fictional demo)", task: "Fictional demo: revisit division step and attempt Q3.", dueDate: date, done: false };
-  return mutateWorkspace(ownerId, state => {
-    if (state.tests.length || state.submissions.length || state.activities.length || state.followups.length || state.briefs?.length) throw new WorkspaceError("Load fictional demo only into an empty workspace.", 409);
-    return { tests: [test], submissions: [submission, draftSubmission], activities: [activity], followups: [followup] };
-  });
 }

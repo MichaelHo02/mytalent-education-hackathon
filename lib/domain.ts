@@ -29,16 +29,18 @@ export function validateRevision(value: unknown): number {
 }
 export function makeTest(input: unknown, id: string, createdAt: string): Test {
   const value = object(input);
+  const markIncrement = value.markIncrement ?? 0.5;
+  if (markIncrement !== 0.5 && markIncrement !== 1) throw new WorkspaceError("Mark increment must be 0.5 or 1.");
   if (!Array.isArray(value.questions) || !value.questions.length || value.questions.length > 60) throw new WorkspaceError("Provide between 1 and 60 questions.");
   const ids = new Set<string>();
   const questions = value.questions.map(item => {
     const question = object(item); const questionId = text(question.id, "Question ID", 40);
     if (ids.has(questionId)) throw new WorkspaceError(`Question ID ${questionId} is duplicated.`);
     ids.add(questionId);
-    if (typeof question.maxMarks !== "number" || !Number.isFinite(question.maxMarks) || question.maxMarks <= 0 || question.maxMarks > 100 || question.maxMarks * 2 !== Math.floor(question.maxMarks * 2)) throw new WorkspaceError("Maximum marks must be a positive number in half-mark increments, at most 100.");
+    if (typeof question.maxMarks !== "number" || !Number.isFinite(question.maxMarks) || question.maxMarks <= 0 || question.maxMarks > 100 || question.maxMarks % markIncrement !== 0) throw new WorkspaceError(`Maximum marks must be a positive number in ${markIncrement}-mark increments, at most 100.`);
     return { id: questionId, topic: text(question.topic, "Topic", 120), maxMarks: question.maxMarks, criteria: text(question.criteria, "Marking criteria", 6000) };
   });
-  return { id, title: text(value.title, "Test title", 160), guideText: text(value.guideText, "Worked solutions and guide", 120000), questions, createdAt };
+  return { id, title: text(value.title, "Test title", 160), guideText: text(value.guideText, "Worked solutions and guide", 120000), questions, markIncrement, createdAt };
 }
 export function makeSubmission(state: WorkspaceState, input: CreateSubmissionInput, id: string, createdAt: string): Submission {
   const test = state.tests.find(item => item.id === input.testId);
@@ -64,6 +66,7 @@ export function validateQuestionMarks(test: Test, input: unknown, forApproval = 
   if (!Array.isArray(input) || input.length !== test.questions.length) throw new WorkspaceError("Include exactly one marking row for every question in the test.");
   const seen = new Set<string>();
   const allowed: MarkStatus[] = ["correct", "wrong", "careless", "blank", "review"];
+  const markIncrement = test.markIncrement ?? 0.5;
   const result = input.map(item => {
     const value = object(item); const questionId = text(value.questionId, "Question ID", 40);
     const rubric = test.questions.find(q => q.id === questionId);
@@ -72,7 +75,7 @@ export function validateQuestionMarks(test: Test, input: unknown, forApproval = 
     const status = value.status as MarkStatus;
     if (!allowed.includes(status)) throw new WorkspaceError(`Invalid result status for ${questionId}.`);
     const marks = value.awardedMarks;
-    if (marks !== null && (typeof marks !== "number" || !Number.isFinite(marks) || marks < 0 || marks > rubric.maxMarks || marks * 2 !== Math.floor(marks * 2))) throw new WorkspaceError(`Marks for ${questionId} must be between 0 and ${rubric.maxMarks} in half-mark increments.`);
+    if (marks !== null && (typeof marks !== "number" || !Number.isFinite(marks) || marks < 0 || marks > rubric.maxMarks || marks % markIncrement !== 0)) throw new WorkspaceError(`Marks for ${questionId} must be between 0 and ${rubric.maxMarks} in ${markIncrement}-mark increments.`);
     const evidence = text(value.evidence, "Evidence", 6000, true); const reason = text(value.reason, "Marking explanation", 6000, true);
     if (status === "blank" && marks !== 0) throw new WorkspaceError(`Unanswered question ${questionId} must receive 0 marks.`);
     if (status === "correct" && marks !== rubric.maxMarks) throw new WorkspaceError(`Correct question ${questionId} must receive full marks.`);

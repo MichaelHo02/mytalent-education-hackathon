@@ -1,4 +1,5 @@
 import { getChatGPTUser, type ChatGPTUser } from "../chatgpt-auth";
+import { headers } from "next/headers";
 import { WorkspaceError } from "@/lib/domain";
 import { getFile } from "@/lib/store";
 
@@ -40,11 +41,33 @@ export async function payload(request: Request): Promise<Record<string, unknown>
     throw new WorkspaceError("Provide valid JSON.");
   }
 }
-export async function authenticated(action: (user: ChatGPTUser) => Promise<Response>): Promise<Response> {
+const GUEST_COOKIE = "tutor_guest";
+function guestToken(cookieHeader: string | null): string | null {
+  const value = cookieHeader?.split(";").map(cookie => cookie.trim()).find(cookie => cookie.startsWith(`${GUEST_COOKIE}=`))?.slice(GUEST_COOKIE.length + 1);
+  return value && /^[0-9a-f]{64}$/.test(value) ? value : null;
+}
+function hex(bytes: Uint8Array): string { return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(""); }
+async function guestUser(token: string): Promise<ChatGPTUser> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return { userId: `guest:${hex(new Uint8Array(digest))}`, displayName: "Guest", email: "", fullName: null };
+}
+export async function authenticated(action: (user: ChatGPTUser) => Promise<Response>, options: { allowGuestCreation?: boolean; requestUrl?: string } = {}): Promise<Response> {
   try {
     const user = await getChatGPTUser();
-    if (!user) throw new WorkspaceError("Sign in with ChatGPT to access your workspace.", 401);
-    return await action(user);
+    if (user) return await action(user);
+    const requestHeaders = await headers();
+    let token = guestToken(requestHeaders.get("cookie")); let created = false;
+    if (!token) {
+      if (!options.allowGuestCreation) throw new WorkspaceError("Reload the workspace to start your guest session before saving records.", 401);
+      token = hex(crypto.getRandomValues(new Uint8Array(32))); created = true;
+    }
+    const response = await action(await guestUser(token));
+    if (created) {
+      // Only the workspace GET can start a session. Credentials stay in an HttpOnly cookie.
+      const secure = !options.requestUrl || new URL(options.requestUrl).protocol === "https:";
+      response.headers.append("Set-Cookie", `${GUEST_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure ? "; Secure" : ""}`);
+    }
+    return response;
   } catch (error) {
     if (error instanceof WorkspaceError) return json({ error: error.message }, error.status);
     console.error("Workspace operation failed", error);

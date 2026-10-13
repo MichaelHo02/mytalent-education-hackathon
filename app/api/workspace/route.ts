@@ -7,5 +7,5 @@ export async function GET(request: Request) {
     const queryDate = new URL(request.url).searchParams.get("date"); const date = queryDate ? validateDate(queryDate) : today();
     const state = await readWorkspace(user.userId);
     return json({ state, briefs: generateBriefs(state, date) });
-  });
+  }, { allowGuestCreation: true, requestUrl: request.url });
 }
