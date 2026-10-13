@@ -1,4 +1,4 @@
-import type { Activity, ActivityType, CreateSubmissionInput, ExportKind, Followup, MarkStatus, QuestionMark, SavedBrief, Submission, Test, WorkspaceBriefs, WorkspaceState } from "./types";
+import type { Activity, ActivityType, CreateSubmissionInput, ExhibitMarkingRow, ExhibitOutcome, ExhibitProgressRow, ExportKind, Followup, MarkStatus, QuestionMark, SavedBrief, Submission, Test, WorkspaceBriefs, WorkspaceExhibits, WorkspaceState } from "./types";
 
 export class WorkspaceError extends Error {
   constructor(message: string, public status = 400) { super(message); this.name = "WorkspaceError"; }
@@ -162,24 +162,62 @@ export function csvCell(value: unknown): string {
   if (/^[\s\uFEFF]*[=+@-]/u.test(text) || /^[\t\r\n]/u.test(text)) text = "'" + text;
   return `"${text.replace(/"/g, '""')}"`;
 }
+export function generateExhibits(state: WorkspaceState): WorkspaceExhibits {
+  const approved = state.submissions.filter(s => s.status === "approved").sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  const outcomes: Record<Exclude<MarkStatus, "review">, ExhibitOutcome> = { correct: "DONE", wrong: "W", careless: "C", blank: "Blank" };
+  const marking: ExhibitMarkingRow[] = [];
+  const tests = new Map(state.tests.map(test => [test.id, test]));
+  for (const submission of approved) {
+    const test = tests.get(submission.testId);
+    if (!test) throw new WorkspaceError("An approved submission is missing its test.");
+    // Reuse approval validation so malformed stored rows cannot become official records.
+    for (const mark of validateQuestionMarks(test, submission.questions, true)) {
+      const question = test.questions.find(q => q.id === mark.questionId)!;
+      marking.push({ studentName: submission.studentName, testId: test.id, testTitle: test.title, submissionId: submission.id, date: submission.date, questionId: question.id, topic: question.topic, marks: mark.awardedMarks!, maxMarks: question.maxMarks, outcome: outcomes[mark.status as Exclude<MarkStatus, "review">], evidence: mark.evidence || (mark.status === "blank" ? "Not attempted." : ""), reason: mark.reason, tutorNote: mark.tutorNote, approvedAt: submission.approvedAt ?? "" });
+    }
+  }
+  // Exact saved aliases and topic labels are the available grouping keys. A test
+  // catalogue is not a complete course catalogue, and marks are not mastery.
+  const students = [...new Set(approved.map(s => s.studentName))];
+  const topics = [...new Set(state.tests.flatMap(test => test.questions.map(q => q.topic)))];
+  const progress: ExhibitProgressRow[] = students.flatMap(studentName => topics.map(topic => {
+    const source = marking.filter(row => row.studentName === studentName && row.topic === topic);
+    const marks = source.reduce((sum, row) => sum + row.marks, 0);
+    const maxMarks = source.reduce((sum, row) => sum + row.maxMarks, 0);
+    const counts: Record<ExhibitOutcome, number> = { DONE: 0, W: 0, C: 0, Blank: 0 };
+    for (const row of source) counts[row.outcome] += 1;
+    return { studentName, topic, marks, maxMarks, percentage: maxMarks ? Math.round(marks / maxMarks * 10000) / 100 : null, evidenceCount: source.length, evidenceStatus: source.length ? "Approved evidence" : "No approved evidence", mastery: "Tutor confirmation needed", evidenceRefs: source.map(row => `${row.submissionId}:${row.questionId}`), evidence: source.map(row => `${row.testTitle} (${row.date}), ${row.questionId}: ${row.marks}/${row.maxMarks}. ${row.evidence} ${row.reason}`.trim()), nextSteps: [...new Set(source.filter(row => row.marks < row.maxMarks).map(row => row.tutorNote || row.reason || `Review ${topic} with the tutor.`))], latestDate: source.at(-1)?.date ?? null, outcomes: counts };
+  }));
+  const attempts = new Map<string, Submission[]>();
+  for (const submission of approved) {
+    const key = JSON.stringify([submission.studentName, submission.testId]);
+    const group = attempts.get(key) ?? [];
+    group.push(submission); attempts.set(key, group);
+  }
+  const exams = approved.map(submission => {
+    const test = tests.get(submission.testId)!;
+    const source = marking.filter(row => row.submissionId === submission.id);
+    const score = source.reduce((sum, row) => sum + row.marks, 0);
+    const maxScore = source.reduce((sum, row) => sum + row.maxMarks, 0);
+    const group = attempts.get(JSON.stringify([submission.studentName, submission.testId]))!;
+    return { studentName: submission.studentName, testId: test.id, testTitle: test.title, submissionId: submission.id, date: submission.date, score, maxScore, percentage: Math.round(score / maxScore * 10000) / 100, recordedAttempt: group.findIndex(row => row.id === submission.id) + 1, recordedAttempts: group.length, approvedAt: submission.approvedAt ?? "" };
+  });
+  return { marking, progress, exams, scope: { progress: "Topics from saved tests only. Percentages summarise approved question marks, not course coverage or mastery. Grouped by exact student alias and topic label; tutor confirmation is needed for mastery.", exams: "Recorded attempts include approved submissions in this workspace for the same student alias and saved test, ordered by test date. They do not establish lifetime attempt history, class membership or pass/fail decisions." } };
+}
 export function exportWorkspaceCsv(state: WorkspaceState, kind: ExportKind, date = today()): string {
   const rows: unknown[][] = [];
   const approved = state.submissions.filter(s => s.status === "approved");
-  if (kind === "marking" || kind === "progress") {
-    rows.push(kind === "marking" ? ["Student", "Test", "Test date", "Question", "Marks", "Maximum marks", "Result", "Evidence", "Marking explanation", "Tutor note", "Approved at"] : ["Student", "Test", "Test date", "Topic", "Question", "Marks", "Maximum marks", "Evidence", "Suggested next step", "Approved at"]);
-    for (const submission of approved) {
-      const test = state.tests.find(t => t.id === submission.testId)!;
-      for (const mark of submission.questions) {
-        const question = test.questions.find(q => q.id === mark.questionId)!;
-        rows.push(kind === "marking" ? [submission.studentName, test.title, submission.date, mark.questionId, mark.awardedMarks, question.maxMarks, mark.status, mark.evidence, mark.reason, mark.tutorNote, submission.approvedAt] : [submission.studentName, test.title, submission.date, question.topic, question.id, mark.awardedMarks, question.maxMarks, mark.evidence || "Not attempted", mark.awardedMarks === question.maxMarks ? "Full marks on this question; no mastery claim inferred." : mark.tutorNote || mark.reason || `Practise ${question.topic} with the tutor.`, submission.approvedAt]);
-      }
-    }
+  if (kind === "marking") {
+    rows.push(["Student", "Test / module title", "Test date", "Question", "Syllabus point / topic", "Marks", "Maximum marks", "Outcome (DONE/W/C/Blank)", "Evidence", "Marking explanation", "Tutor note", "Approved at", "Evidence reference"]);
+    for (const row of generateExhibits(state).marking) rows.push([row.studentName, row.testTitle, row.date, row.questionId, row.topic, row.marks, row.maxMarks, row.outcome, row.evidence, row.reason, row.tutorNote, row.approvedAt, `${row.submissionId}:${row.questionId}`]);
+  } else if (kind === "progress") {
+    const exhibits = generateExhibits(state);
+    rows.push(["Student", "Syllabus point / topic", "Approved question results", "Marks across recorded evidence", "Maximum marks across recorded evidence", "Observed mark percentage (not mastery)", "Evidence status", "Mastery", "DONE", "W", "C", "Blank", "Latest test date", "Evidence", "Suggested next steps", "Evidence references", "Scope"]);
+    for (const row of exhibits.progress) rows.push([row.studentName, row.topic, row.evidenceCount, row.marks, row.maxMarks, row.percentage, row.evidenceStatus, row.mastery, row.outcomes.DONE, row.outcomes.W, row.outcomes.C, row.outcomes.Blank, row.latestDate, row.evidence.join("\n"), row.nextSteps.join("\n"), row.evidenceRefs.join("; "), exhibits.scope.progress]);
   } else if (kind === "exams") {
-    rows.push(["Student", "Test", "Test date", "Score", "Maximum score", "Percentage", "Submission ID", "Approved at"]);
-    for (const submission of approved) {
-      const test = state.tests.find(t => t.id === submission.testId)!; const score = submission.questions.reduce((sum, q) => sum + (q.awardedMarks ?? 0), 0); const max = test.questions.reduce((sum, q) => sum + q.maxMarks, 0);
-      rows.push([submission.studentName, test.title, submission.date, score, max, Math.round(score / max * 10000) / 100, submission.id, submission.approvedAt]);
-    }
+    const exhibits = generateExhibits(state);
+    rows.push(["Student", "Test / module title", "Test date", "Score", "Maximum score", "Percentage", "Recorded attempt", "Total recorded attempts for this test", "Submission ID", "Approved at", "Scope"]);
+    for (const row of exhibits.exams) rows.push([row.studentName, row.testTitle, row.date, row.score, row.maxScore, row.percentage, row.recordedAttempt, row.recordedAttempts, row.submissionId, row.approvedAt, exhibits.scope.exams]);
   } else if (kind === "daily") {
     rows.push(["Date", "Record type", "Student", "Count", "Details", "Evidence reference"]);
     for (const submission of approved.filter(s => s.approvedAt && calendarDate(s.approvedAt) === date)) rows.push([date, "paper_approved", submission.studentName, 1, state.tests.find(t => t.id === submission.testId)!.title, submission.id]);

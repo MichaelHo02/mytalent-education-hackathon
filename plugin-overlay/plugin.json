@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dev-6a8a554913148191a4ecd150b050413d",
+  "version": "1.0.2",
+  "description": "Review paper tests, maintain tutor records, and prepare evidence-based conversations.",
+  "author": {
+    "name": "App developer"
+  },
+  "extensions": {
+    "com.openai": {
+      "apps": "./.app.json",
+      "interface": {
+        "capabilities": [],
+        "category": "Other",
+        "defaultPrompt": null,
+        "developerName": "App developer",
+        "displayName": "Tutor Workspace",
+        "longDescription": "Review paper tests, maintain tutor records, and prepare evidence-based conversations.",
+        "shortDescription": "Review paper tests, maintain tutor records, and prepare evidence-based conversations.",
+        "websiteURL": "https://tutor-evidence-workspace.quick-scarf-1289.chatgpt.site"
+      }
+    }
+  }
+}

@@ -24,13 +24,22 @@ const activity=await request('/api/activities','POST',{date:'2026-10-13',type:'q
 const brief=await request('/api/briefs','POST',{submissionId:s.id,audience:'student',date:'2026-10-13',text:'QA fixture draft: Q1 earned 1/2.',evidenceRefs:[`${s.id}:Q1`],sourceRevisions:{[s.id]:s.revision}});assert.equal(brief.r.status,201);
 let rpcId=0;
 async function rpc(method,params,auth=identity){return request('/mcp','POST',{jsonrpc:'2.0',id:++rpcId,method,params},auth);}
-const init=await rpc('initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'qa',version:'1'}});assert.ok(init.data.result.capabilities.tools);
+const init=await rpc('initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'qa',version:'1'}});assert.ok(init.data.result.capabilities.tools);assert.equal(init.data.result.serverInfo.title,'MyTalent Education');
 const list=await rpc('tools/list',{});assert.ok(list.data.result.tools.find(t=>t.name==='open_tutor_workspace')._meta['openai/ui'].entrypoints.some(e=>e.type==='global'));
+assert.deepEqual(list.data.result.tools.find(t=>t.name==='create_test').inputSchema.properties.markIncrement.enum,[0.5,1]);
+assert.equal(list.data.result.tools.find(t=>t.name==='get_admin_records').annotations.readOnlyHint,true);
+const records=await rpc('tools/call',{name:'get_admin_records',arguments:{}});
+const exhibits=records.data.result.structuredContent.exhibits;
+assert.equal(exhibits.marking.length,2);assert.equal(exhibits.exams.length,1);
+assert.ok(exhibits.marking.every(row=>row.submissionId===s.id));
+assert.ok(exhibits.progress.every(row=>row.mastery==='Tutor confirmation needed'));
+assert.equal(exhibits.exams[0].recordedAttempts,1);
+const malformed=await rpc('tools/call',{name:'get_workspace',arguments:['invalid']});assert.equal(malformed.data.error.code,-32602);
 const resource=await rpc('resources/read',{uri:'ui://tutor/workspace'});assert.ok(resource.data.result.contents[0].text.includes('__TUTOR_MCP_APP__'));
 const image=await rpc('tools/call',{name:'get_submission_photo',arguments:{submissionId:s.id,fileId:s.files[0].id}});assert.equal(image.data.result.content.find(c=>c.type==='image').data,png);
 const denied=await rpc('tools/call',{name:'get_workspace',arguments:{}},{});assert.equal(denied.data.result.isError,true);
 const modelSave=await rpc('tools/call',{name:'save_marking_draft',arguments:{submissionId:s.id,expectedRevision:s.revision,questions:rows}});assert.equal(modelSave.data.result.structuredContent.status,409);
 assert.equal(modelSave.data.result.isError,true);
 const missingStudent=await rpc('tools/call',{name:'get_conversation_evidence',arguments:{audience:'student'}});assert.equal(missingStudent.data.result.isError,true);
-console.log('Passed local Worker flow: identity, uploads/ownership, partial marks, review gate, revision conflicts, approved-only CSV, chat references, activities, saved briefs, MCP discovery/resource and actual photo bytes.');
+console.log('Passed local Worker flow: identity, uploads/ownership, partial marks, review gate, revision conflicts, approved-only CSV and Exhibits 1–3, chat references, activities, saved briefs, MCP discovery/resource and actual photo bytes.');
 console.log(`QA records are isolated under ${owner}; no tutor workspace records were changed.`);

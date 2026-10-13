@@ -7,6 +7,7 @@ import tailwind from "@tailwindcss/postcss";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const logo = `data:image/png;base64,${(await readFile(resolve(root,'public/mytalent-logo.png'))).toString('base64')}`;
+const codexIcon = `data:image/png;base64,${(await readFile(resolve(root,'public/codex-icon.png'))).toString('base64')}`;
 const entry = `import React from "react";
 import {createRoot} from "react-dom/client";
 import Workspace from "./app/components/Workspace";
@@ -24,7 +25,7 @@ const javascript = await build({
   target: "es2022",
   minify: true,
   define: { "process.env.NODE_ENV": '"production"' },
-  plugins:[{name:'inline-logo',setup(builder){builder.onLoad({filter:/Workspace\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8')).replaceAll('"/mytalent-logo.png"',JSON.stringify(logo)),loader:'tsx'}));}}],
+  plugins:[{name:'inline-logo',setup(builder){builder.onLoad({filter:/Workspace\.tsx$/},async({path})=>({contents:(await readFile(path,'utf8')).replaceAll('"/mytalent-logo.png"',JSON.stringify(logo)).replaceAll('"/codex-icon.png"',JSON.stringify(codexIcon)),loader:'tsx'}));}}],
   tsconfig: resolve(root, "tsconfig.json"),
 });
 const cssPath = resolve(root, "app/globals.css");

@@ -16,3 +16,24 @@ export type CreateTestInput = Pick<Test, "title" | "guideText" | "questions" | "
 export type CreateSubmissionInput = Pick<Submission, "testId" | "studentName" | "date" | "files">;
 export type CreateActivityInput = Omit<Activity, "id">;
 export type CreateFollowupInput = Omit<Followup, "id" | "done">;
+export type ExhibitOutcome = "DONE" | "W" | "C" | "Blank";
+export type ExhibitMarkingRow = {
+  studentName: string; testId: string; testTitle: string; submissionId: string; date: string;
+  questionId: string; topic: string; marks: number; maxMarks: number; outcome: ExhibitOutcome;
+  evidence: string; reason: string; tutorNote: string; approvedAt: string;
+};
+export type ExhibitProgressRow = {
+  studentName: string; topic: string; marks: number; maxMarks: number; percentage: number | null;
+  evidenceCount: number; evidenceStatus: "Approved evidence" | "No approved evidence";
+  mastery: "Tutor confirmation needed"; evidenceRefs: string[]; evidence: string[]; nextSteps: string[];
+  latestDate: string | null; outcomes: Record<ExhibitOutcome, number>;
+};
+export type ExhibitExamRow = {
+  studentName: string; testId: string; testTitle: string; submissionId: string; date: string;
+  score: number; maxScore: number; percentage: number; recordedAttempt: number;
+  recordedAttempts: number; approvedAt: string;
+};
+export type WorkspaceExhibits = {
+  marking: ExhibitMarkingRow[]; progress: ExhibitProgressRow[]; exams: ExhibitExamRow[];
+  scope: { progress: string; exams: string };
+};

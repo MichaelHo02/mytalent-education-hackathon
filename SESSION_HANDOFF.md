@@ -1,3 +1,21 @@
+# Guided sidebar update — 13 October 2026
+
+Working checkout: `/Users/holeminhthach/Developer/Hackathon/tutor-guided-sidebar`, branch `codex/tutor-guided-sidebar`.
+
+User confirmed the guided Codex flow and explicitly removed all manual record-entry forms and saved-rubric selection. The primary button reads **Mark student work with Codex** and uses the icon from the installed OpenAI desktop app. Codex asks for photos and optional supplied rubric, matches a saved guide when possible, saves draft marks and feedback. The sidebar displays evidence and approves results; revisions are requested through Codex. Approval derives all three Exhibits and requests student/parent/manager briefs through the host SDK. The reporting date resets to the actual approval date.
+
+The Site access policy is now **public**. Website guests remain separate from the signed-in plugin workspace. Local D1 was initialised in the new worktree; the user explicitly says demo data need not persist if storage needs replacement.
+
+Exhibit 1 has DONE/W/C/Blank, syllabus topics and evidence. Exhibit 2 aggregates topic evidence; no full course catalogue or confirmed mastery rubric was supplied, so it explicitly awaits tutor mastery confirmation. Exhibit 3 describes only attempts recorded in this workspace, not lifetime attempts or inferred pass/fail.
+
+The canonical plugin has the tutor-workflow skill uploaded through Plugin Creator, version 1.0.2. The backend reports the plugin already installed. Plugin catalogue presentation is owned by Sites and previously retained the old label Tutor Workspace; the MCP entrypoint and app UI are MyTalent Education. Never create a duplicate plugin. Verify deployment/catalogue refresh separately.
+
+Validation: 28 unit/domain/SDK mock-host tests and TypeScript passed. The user explicitly volunteered to test the installed native app, so native messaging, attachment interpretation and live marking remain for their verification. Do not claim that full native flow has passed.
+
+Source publication through the Sites helper makes its required deployment snapshot commit. No GitHub main merge is requested; the original main checkout is unchanged.
+
+---
+
 # MyTalent Education session handoff
 
 The hackathon prototype helps a learning support tutor mark photographed paper tests, update administrative records, and prepare evidence-based student, parent and manager conversations. The next session should finish deployment and verify the real host workflow. The current source snapshot is saved to GitHub; the deployed Site is an earlier version.
