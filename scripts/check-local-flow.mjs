@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+const base=process.env.TUTOR_QA_URL||'http://127.0.0.1:5174';
+if(!['127.0.0.1','localhost'].includes(new URL(base).hostname))throw new Error('This synthetic QA script is restricted to a local Worker.');
+const owner=`qa-${crypto.randomUUID()}`;
+const identity={'oai-authenticated-user-id':owner,'oai-authenticated-user-email':'qa@sites.test'};
+async function request(path,method='GET',body,auth=identity){const r=await fetch(base+path,{method,headers:{...auth,...(body&&!(body instanceof FormData)?{'content-type':'application/json'}:{})},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});return {r,data:r.headers.get('content-type')?.includes('application/json')?await r.json():await r.text()};}
+const unauth=await request('/api/workspace','GET',undefined,{});assert.equal(unauth.r.status,401);
+const empty=await request('/api/workspace');assert.deepEqual(empty.data.state.tests,[]);
+const created=await request('/api/tests','POST',{title:'QA-only method marks',guideText:'Q1: f(x)=x²; f\'(x)=2x. Award 1 for method, 1 for result. Q2: solve 2x=6; x=3. One mark.',questions:[{id:'Q1',topic:'Derivative',maxMarks:2,criteria:'1 method + 1 result'},{id:'Q2',topic:'Equation',maxMarks:1,criteria:'x=3'}]});assert.equal(created.r.status,201);const test=created.data.state.tests[0];
+const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+const form=new FormData();form.append('testId',test.id);form.append('studentName','QA synthetic record');form.append('date','2026-10-13');form.append('files',new Blob([Buffer.from(png,'base64')],{type:'image/png'}),'qa-fixture.png');
+const uploaded=await request('/api/submissions','POST',form);assert.equal(uploaded.r.status,201);let s=uploaded.data.submission;
+const unresolved=await request(`/api/submissions/${s.id}/approve`,'POST',{expectedRevision:s.revision});assert.equal(unresolved.r.status,400);
+const rows=[{questionId:'Q1',awardedMarks:1,status:'wrong',evidence:'QA synthetic evidence: method shown; final result incorrect.',reason:'One method mark.',tutorNote:'Review final derivative.'},{questionId:'Q2',awardedMarks:0,status:'blank',evidence:'QA synthetic answer absent.',reason:'Not attempted.',tutorNote:''}];
+const draft=await request(`/api/submissions/${s.id}`,'PATCH',{expectedRevision:0,questions:rows});assert.equal(draft.r.status,200);s=draft.data.state.submissions[0];
+const stale=await request(`/api/submissions/${s.id}`,'PATCH',{expectedRevision:0,questions:rows});assert.equal(stale.r.status,409);
+const before=await request('/api/export?kind=marking');assert.equal(before.r.status,200);assert.equal(before.data.split('\r\n').filter(Boolean).length,1);
+const approved=await request(`/api/submissions/${s.id}/approve`,'POST',{expectedRevision:s.revision});assert.equal(approved.r.status,200);s=approved.data.state.submissions[0];assert.equal(s.status,'approved');
+const csv=await request('/api/export?kind=marking');assert.equal(csv.data.split('\r\n').filter(Boolean).length,3);
+const photo=await request(`/api/files/${s.files[0].id}`);assert.equal(photo.r.status,200);
+const other=await request(`/api/files/${s.files[0].id}`,'GET',undefined,{'oai-authenticated-user-id':'qa-other','oai-authenticated-user-email':'other@sites.test'});assert.equal(other.r.status,404);
+const chat=await request('/api/chat-submissions','POST',{testId:test.id,studentName:'QA chat-only alias',date:'2026-10-13',chatAttachmentNames:['paper1.jpg']});assert.equal(chat.r.status,201);assert.equal(chat.data.submission.inputSource,'chat');assert.equal(chat.data.submission.files.length,0);
+const activity=await request('/api/activities','POST',{date:'2026-10-13',type:'qa',studentName:'QA synthetic record',count:1,notes:'QA fixture support'});assert.equal(activity.r.status,201);
+const brief=await request('/api/briefs','POST',{submissionId:s.id,audience:'student',date:'2026-10-13',text:'QA fixture draft: Q1 earned 1/2.',evidenceRefs:[`${s.id}:Q1`],sourceRevisions:{[s.id]:s.revision}});assert.equal(brief.r.status,201);
+let rpcId=0;
+async function rpc(method,params,auth=identity){return request('/mcp','POST',{jsonrpc:'2.0',id:++rpcId,method,params},auth);}
+const init=await rpc('initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'qa',version:'1'}});assert.ok(init.data.result.capabilities.tools);
+const list=await rpc('tools/list',{});assert.ok(list.data.result.tools.find(t=>t.name==='open_tutor_workspace')._meta['openai/ui'].entrypoints.some(e=>e.type==='global'));
+const resource=await rpc('resources/read',{uri:'ui://tutor/workspace'});assert.ok(resource.data.result.contents[0].text.includes('__TUTOR_MCP_APP__'));
+const image=await rpc('tools/call',{name:'get_submission_photo',arguments:{submissionId:s.id,fileId:s.files[0].id}});assert.equal(image.data.result.content.find(c=>c.type==='image').data,png);
+const denied=await rpc('tools/call',{name:'get_workspace',arguments:{}},{});assert.equal(denied.data.result.isError,true);
+const modelSave=await rpc('tools/call',{name:'save_marking_draft',arguments:{submissionId:s.id,expectedRevision:s.revision,questions:rows}});assert.equal(modelSave.data.result.structuredContent.status,409);
+assert.equal(modelSave.data.result.isError,true);
+const missingStudent=await rpc('tools/call',{name:'get_conversation_evidence',arguments:{audience:'student'}});assert.equal(missingStudent.data.result.isError,true);
+console.log('Passed local Worker flow: identity, uploads/ownership, partial marks, review gate, revision conflicts, approved-only CSV, chat references, activities, saved briefs, MCP discovery/resource and actual photo bytes.');
+console.log(`QA records are isolated under ${owner}; no tutor workspace records were changed.`);

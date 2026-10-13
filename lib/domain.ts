@@ -1,0 +1,187 @@
+import type { Activity, ActivityType, CreateSubmissionInput, ExportKind, Followup, MarkStatus, QuestionMark, SavedBrief, Submission, Test, WorkspaceBriefs, WorkspaceState } from "./types";
+
+export class WorkspaceError extends Error {
+  constructor(message: string, public status = 400) { super(message); this.name = "WorkspaceError"; }
+}
+export function emptyWorkspace(): WorkspaceState { return { tests: [], submissions: [], activities: [], followups: [] }; }
+export function today(): string { return calendarDate(new Date().toISOString()); }
+export function calendarDate(iso: string): string { return new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Melbourne", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(iso)); }
+
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new WorkspaceError("Provide an object with the required fields.");
+  return value as Record<string, unknown>;
+}
+function text(value: unknown, name: string, max: number, optional = false): string {
+  if (optional && (value === undefined || value === null)) return "";
+  if (typeof value !== "string") throw new WorkspaceError(`${name} must be text.`);
+  const result = value.trim();
+  if ((!optional && !result) || result.length > max) throw new WorkspaceError(`${name} ${!result ? "is required" : `must have at most ${max} characters`}.`);
+  return result;
+}
+export function validateDate(value: unknown, name = "Date"): string {
+  const result = text(value, name, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || Number.isNaN(Date.parse(result + "T00:00:00Z")) || new Date(result + "T00:00:00Z").toISOString().slice(0, 10) !== result) throw new WorkspaceError(`${name} must be a real date in YYYY-MM-DD format.`);
+  return result;
+}
+export function validateRevision(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw new WorkspaceError("expectedRevision must be a non-negative integer.");
+  return value;
+}
+export function makeTest(input: unknown, id: string, createdAt: string): Test {
+  const value = object(input);
+  if (!Array.isArray(value.questions) || !value.questions.length || value.questions.length > 60) throw new WorkspaceError("Provide between 1 and 60 questions.");
+  const ids = new Set<string>();
+  const questions = value.questions.map(item => {
+    const question = object(item); const questionId = text(question.id, "Question ID", 40);
+    if (ids.has(questionId)) throw new WorkspaceError(`Question ID ${questionId} is duplicated.`);
+    ids.add(questionId);
+    if (typeof question.maxMarks !== "number" || !Number.isFinite(question.maxMarks) || question.maxMarks <= 0 || question.maxMarks > 100 || question.maxMarks * 2 !== Math.floor(question.maxMarks * 2)) throw new WorkspaceError("Maximum marks must be a positive number in half-mark increments, at most 100.");
+    return { id: questionId, topic: text(question.topic, "Topic", 120), maxMarks: question.maxMarks, criteria: text(question.criteria, "Marking criteria", 6000) };
+  });
+  return { id, title: text(value.title, "Test title", 160), guideText: text(value.guideText, "Worked solutions and guide", 120000), questions, createdAt };
+}
+export function makeSubmission(state: WorkspaceState, input: CreateSubmissionInput, id: string, createdAt: string): Submission {
+  const test = state.tests.find(item => item.id === input.testId);
+  if (!test) throw new WorkspaceError("Test not found.", 404);
+  if (!Array.isArray(input.files) || input.files.length === 0 || input.files.length > 20) throw new WorkspaceError("Upload between 1 and 20 pages or PDFs.");
+  return { id, testId: test.id, studentName: text(input.studentName, "Student name or alias", 100), date: validateDate(input.date), files: input.files, inputSource: "workspace", questions: test.questions.map(q => ({ questionId: q.id, awardedMarks: null, status: "review", evidence: "", reason: "", tutorNote: "" })), status: "awaiting_marking", revision: 0, createdAt };
+}
+export function makeChatSubmission(state: WorkspaceState, input: unknown, id: string, createdAt: string): Submission {
+  const value = object(input); const testId = text(value.testId, "Test ID", 100);
+  const test = state.tests.find(item => item.id === testId);
+  if (!test) throw new WorkspaceError("Test not found.", 404);
+  if (!Array.isArray(value.chatAttachmentNames) || value.chatAttachmentNames.length === 0 || value.chatAttachmentNames.length > 20) throw new WorkspaceError("List between 1 and 20 attachment names from the current conversation.");
+  const chatAttachmentNames = value.chatAttachmentNames.map(name => text(name, "Chat attachment name", 240));
+  if (new Set(chatAttachmentNames).size !== chatAttachmentNames.length) throw new WorkspaceError("Use unique attachment names so the tutor can identify each page.");
+  return { id, testId, studentName: text(value.studentName, "Student name or alias", 100), date: validateDate(value.date), files: [], inputSource: "chat", chatAttachmentNames, questions: test.questions.map(q => ({ questionId: q.id, awardedMarks: null, status: "review", evidence: "", reason: "", tutorNote: "" })), status: "awaiting_marking", revision: 0, createdAt };
+}
+export function findSubmission(state: WorkspaceState, id: string): Submission {
+  const result = state.submissions.find(item => item.id === id);
+  if (!result) throw new WorkspaceError("Submission not found.", 404);
+  return result;
+}
+export function validateQuestionMarks(test: Test, input: unknown, forApproval = false): QuestionMark[] {
+  if (!Array.isArray(input) || input.length !== test.questions.length) throw new WorkspaceError("Include exactly one marking row for every question in the test.");
+  const seen = new Set<string>();
+  const allowed: MarkStatus[] = ["correct", "wrong", "careless", "blank", "review"];
+  const result = input.map(item => {
+    const value = object(item); const questionId = text(value.questionId, "Question ID", 40);
+    const rubric = test.questions.find(q => q.id === questionId);
+    if (!rubric || seen.has(questionId)) throw new WorkspaceError(`Unknown or duplicate question ${questionId}.`);
+    seen.add(questionId);
+    const status = value.status as MarkStatus;
+    if (!allowed.includes(status)) throw new WorkspaceError(`Invalid result status for ${questionId}.`);
+    const marks = value.awardedMarks;
+    if (marks !== null && (typeof marks !== "number" || !Number.isFinite(marks) || marks < 0 || marks > rubric.maxMarks || marks * 2 !== Math.floor(marks * 2))) throw new WorkspaceError(`Marks for ${questionId} must be between 0 and ${rubric.maxMarks} in half-mark increments.`);
+    const evidence = text(value.evidence, "Evidence", 6000, true); const reason = text(value.reason, "Marking explanation", 6000, true);
+    if (status === "blank" && marks !== 0) throw new WorkspaceError(`Unanswered question ${questionId} must receive 0 marks.`);
+    if (status === "correct" && marks !== rubric.maxMarks) throw new WorkspaceError(`Correct question ${questionId} must receive full marks.`);
+    if (forApproval && (status === "review" || marks === null)) throw new WorkspaceError(`Resolve the mark and review status for ${questionId} before approving.`);
+    if (forApproval && status !== "blank" && (!evidence || !reason)) throw new WorkspaceError(`Add evidence and an explanation for ${questionId} before approving.`);
+    return { questionId, awardedMarks: marks as number | null, status, evidence, reason, tutorNote: text(value.tutorNote, "Tutor note", 4000, true) };
+  });
+  return test.questions.map(q => result.find(mark => mark.questionId === q.id)!);
+}
+function revisionCheck(submission: Submission, revision: unknown): void {
+  if (submission.revision !== validateRevision(revision)) throw new WorkspaceError("This submission changed in another window. Reload before saving.", 409);
+  if (submission.status === "approved") throw new WorkspaceError("Approved marking is locked. Create another submission to record a new attempt.", 409);
+}
+export function draftMarking(state: WorkspaceState, id: string, questions: unknown, expectedRevision: unknown): WorkspaceState {
+  const submission = findSubmission(state, id); revisionCheck(submission, expectedRevision);
+  const test = state.tests.find(item => item.id === submission.testId)!;
+  const updated: Submission = { ...submission, status: "draft", questions: validateQuestionMarks(test, questions), revision: submission.revision + 1 };
+  return { ...state, submissions: state.submissions.map(item => item.id === id ? updated : item) };
+}
+export function approveMarking(state: WorkspaceState, id: string, expectedRevision: unknown, approvedAt: string): WorkspaceState {
+  const submission = findSubmission(state, id); revisionCheck(submission, expectedRevision);
+  const test = state.tests.find(item => item.id === submission.testId)!;
+  const updated: Submission = { ...submission, status: "approved", questions: validateQuestionMarks(test, submission.questions, true), revision: submission.revision + 1, approvedAt };
+  return { ...state, submissions: state.submissions.map(item => item.id === id ? updated : item) };
+}
+export function makeActivity(input: unknown, id: string): Activity {
+  const value = object(input); const types: ActivityType[] = ["attendance", "qa", "parent_contact", "sac_support"];
+  if (!types.includes(value.type as ActivityType)) throw new WorkspaceError("Select a supported activity type.");
+  if (typeof value.count !== "number" || !Number.isInteger(value.count) || value.count < 1 || value.count > 100) throw new WorkspaceError("Activity count must be a whole number from 1 to 100.");
+  return { id, date: validateDate(value.date), type: value.type as ActivityType, studentName: text(value.studentName, "Student name or alias", 100, true), count: value.count, notes: text(value.notes, "Activity notes", 4000, true) };
+}
+export function makeFollowup(input: unknown, id: string): Followup {
+  const value = object(input);
+  return { id, studentName: text(value.studentName, "Student name or alias", 100), task: text(value.task, "Follow-up task", 2000), dueDate: validateDate(value.dueDate, "Due date"), done: false };
+}
+export function makeSavedBrief(state: WorkspaceState, input: unknown, id: string, createdAt: string): SavedBrief {
+  const value = object(input);
+  if (!["student", "parent", "manager"].includes(value.audience as string)) throw new WorkspaceError("Select student, parent or manager as the audience.");
+  const date = validateDate(value.date);
+  const submissionId = value.submissionId === undefined ? undefined : text(value.submissionId, "Submission ID", 100);
+  if (value.audience !== "manager" && !submissionId) throw new WorkspaceError("Student and parent briefs require an approved submission.");
+  if (submissionId && findSubmission(state, submissionId).status !== "approved") throw new WorkspaceError("Briefs can use only approved marking.");
+  if (!Array.isArray(value.evidenceRefs) || !value.evidenceRefs.length || value.evidenceRefs.length > 100 || new Set(value.evidenceRefs).size !== value.evidenceRefs.length) throw new WorkspaceError("Provide unique evidence references for this brief.");
+  const revisions = object(value.sourceRevisions); const used = new Set<string>();
+  const activityIds = new Set(state.activities.filter(a => a.date === date).map(a => a.id));
+  const evidenceRefs = value.evidenceRefs.map(ref => {
+    const reference = text(ref, "Evidence reference", 200);
+    if (activityIds.has(reference)) {
+      if (value.audience !== "manager") throw new WorkspaceError("Student and parent briefs must cite their selected approved submission only.");
+      return reference;
+    }
+    const source = state.submissions.find(s => s.status === "approved" && (s.id === reference || s.questions.some(q => `${s.id}:${q.questionId}` === reference)));
+    if (!source || (submissionId && source.id !== submissionId)) throw new WorkspaceError(`Evidence ${reference} must refer to an approved submission, its question, or a recorded activity.`);
+    if (revisions[source.id] !== source.revision) throw new WorkspaceError("Brief source marking changed. Generate the brief again.", 409);
+    used.add(source.id); return reference;
+  });
+  if (Object.keys(revisions).some(key => !used.has(key))) throw new WorkspaceError("sourceRevisions must match the submissions cited in the brief.");
+  if (submissionId && !used.has(submissionId)) throw new WorkspaceError("Cite the approved submission that this brief discusses.");
+  return { id, submissionId, audience: value.audience as SavedBrief["audience"], date, text: text(value.text, "Brief text", 20000), evidenceRefs, sourceRevisions: Object.fromEntries([...used].map(key => [key, revisions[key] as number])), createdAt };
+}
+export function generateBriefs(state: WorkspaceState, date = today()): WorkspaceBriefs {
+  const approved = state.submissions.filter(s => s.status === "approved");
+  const student = approved.flatMap(submission => {
+    const test = state.tests.find(t => t.id === submission.testId); if (!test) return [];
+    const score = submission.questions.reduce((sum, q) => sum + (q.awardedMarks ?? 0), 0); const maxScore = test.questions.reduce((sum, q) => sum + q.maxMarks, 0);
+    const strengths: string[] = []; const nextSteps: string[] = []; const evidence: string[] = [];
+    for (const mark of submission.questions) {
+      const q = test.questions.find(item => item.id === mark.questionId)!;
+      evidence.push(`${q.id} (${q.topic}): ${mark.awardedMarks}/${q.maxMarks}. ${mark.status === "blank" ? "Not attempted." : mark.evidence} ${mark.reason}${mark.tutorNote ? ` Tutor note: ${mark.tutorNote}` : ""}`.trim());
+      if (mark.awardedMarks === q.maxMarks) strengths.push(`${q.topic}: full marks on ${q.id} (${q.maxMarks}/${q.maxMarks}).`);
+      else nextSteps.push(`${q.id} — revisit ${q.topic}. ${mark.status === "blank" ? "Attempt this question with the tutor." : mark.tutorNote || mark.reason}`);
+    }
+    return [{ submissionId: submission.id, studentName: submission.studentName, testTitle: test.title, date: submission.date, score, maxScore, strengths, nextSteps, evidence, parentTalkingPoints: [`${submission.studentName} scored ${score}/${maxScore} on ${test.title} (${submission.date}); the tutor approved these marks.`, ...strengths.slice(0, 2), ...nextSteps.slice(0, 3)] }];
+  });
+  const markedToday = approved.filter(s => s.approvedAt && calendarDate(s.approvedAt) === date);
+  const activities: Record<ActivityType, number> = { attendance: 0, qa: 0, parent_contact: 0, sac_support: 0 };
+  for (const activity of state.activities.filter(a => a.date === date)) activities[activity.type] += activity.count;
+  const followups = state.followups.filter(f => !f.done).map(f => `${f.studentName}: ${f.task} (due ${f.dueDate}).`);
+  return { student, manager: { date, papersMarked: markedToday.length, marksReviewed: markedToday.reduce((sum, s) => sum + s.questions.length, 0), activities, followups, talkingPoints: [`${markedToday.length} paper(s) approved on ${date}; ${markedToday.reduce((sum, s) => sum + s.questions.length, 0)} question result(s) reviewed.`, `Recorded activity counts: attendance ${activities.attendance}, Q&A ${activities.qa}, parent contacts ${activities.parent_contact}, SAC support ${activities.sac_support}.`, ...followups] } };
+}
+export function csvCell(value: unknown): string {
+  let text = value === null || value === undefined ? "" : String(value);
+  // Excel can interpret formulas after leading whitespace. Quote and neutralise all such text.
+  if (/^[\s\uFEFF]*[=+@-]/u.test(text) || /^[\t\r\n]/u.test(text)) text = "'" + text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+export function exportWorkspaceCsv(state: WorkspaceState, kind: ExportKind, date = today()): string {
+  const rows: unknown[][] = [];
+  const approved = state.submissions.filter(s => s.status === "approved");
+  if (kind === "marking" || kind === "progress") {
+    rows.push(kind === "marking" ? ["Student", "Test", "Test date", "Question", "Marks", "Maximum marks", "Result", "Evidence", "Marking explanation", "Tutor note", "Approved at"] : ["Student", "Test", "Test date", "Topic", "Question", "Marks", "Maximum marks", "Evidence", "Suggested next step", "Approved at"]);
+    for (const submission of approved) {
+      const test = state.tests.find(t => t.id === submission.testId)!;
+      for (const mark of submission.questions) {
+        const question = test.questions.find(q => q.id === mark.questionId)!;
+        rows.push(kind === "marking" ? [submission.studentName, test.title, submission.date, mark.questionId, mark.awardedMarks, question.maxMarks, mark.status, mark.evidence, mark.reason, mark.tutorNote, submission.approvedAt] : [submission.studentName, test.title, submission.date, question.topic, question.id, mark.awardedMarks, question.maxMarks, mark.evidence || "Not attempted", mark.awardedMarks === question.maxMarks ? "Full marks on this question; no mastery claim inferred." : mark.tutorNote || mark.reason || `Practise ${question.topic} with the tutor.`, submission.approvedAt]);
+      }
+    }
+  } else if (kind === "exams") {
+    rows.push(["Student", "Test", "Test date", "Score", "Maximum score", "Percentage", "Submission ID", "Approved at"]);
+    for (const submission of approved) {
+      const test = state.tests.find(t => t.id === submission.testId)!; const score = submission.questions.reduce((sum, q) => sum + (q.awardedMarks ?? 0), 0); const max = test.questions.reduce((sum, q) => sum + q.maxMarks, 0);
+      rows.push([submission.studentName, test.title, submission.date, score, max, Math.round(score / max * 10000) / 100, submission.id, submission.approvedAt]);
+    }
+  } else if (kind === "daily") {
+    rows.push(["Date", "Record type", "Student", "Count", "Details", "Evidence reference"]);
+    for (const submission of approved.filter(s => s.approvedAt && calendarDate(s.approvedAt) === date)) rows.push([date, "paper_approved", submission.studentName, 1, state.tests.find(t => t.id === submission.testId)!.title, submission.id]);
+    for (const activity of state.activities.filter(a => a.date === date)) rows.push([date, activity.type, activity.studentName, activity.count, activity.notes, activity.id]);
+    for (const followup of state.followups.filter(f => f.dueDate === date)) rows.push([date, followup.done ? "followup_completed" : "followup_pending", followup.studentName, 1, followup.task, followup.id]);
+  } else throw new WorkspaceError("Unknown export kind.");
+  return "\uFEFF" + rows.map(row => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
+}
