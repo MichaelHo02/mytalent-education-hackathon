@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { approveMarking, draftMarking, emptyWorkspace, makeActivity, makeChatSubmission, makeFollowup, makeSavedBrief, makeSubmission, makeTest, WorkspaceError } from "./domain";
 import type { CreateSubmissionInput, SubmissionFile, WorkspaceState } from "./types";
-import { withOfficialReference } from "./reference-materials";
+import { withoutDefaultGuides } from "./reference-materials";
 
 function ownerKey(ownerId: string): string {
   if (!ownerId || typeof ownerId !== "string" || ownerId.length > 256) throw new WorkspaceError("Sign in to access your workspace.", 401);
@@ -16,13 +16,13 @@ async function readRow(ownerId: string): Promise<WorkspaceRow | null> {
   return database().prepare("SELECT payload, version FROM workspace_states WHERE owner_id = ?").bind(ownerKey(ownerId)).first<WorkspaceRow>();
 }
 export async function readWorkspace(ownerId: string): Promise<WorkspaceState> {
-  const row = await readRow(ownerId); return withOfficialReference(row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace());
+  const row = await readRow(ownerId); return withoutDefaultGuides(row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace());
 }
 /** Updater must be synchronous and free of side effects: a conflicting write is retried. */
 export async function mutateWorkspace(ownerId: string, updater: (state: WorkspaceState) => WorkspaceState): Promise<WorkspaceState> {
   const key = ownerKey(ownerId);
   for (let attempt = 0; attempt < 5; attempt++) {
-    const row = await readRow(key); const state = withOfficialReference(row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace());
+    const row = await readRow(key); const state = withoutDefaultGuides(row ? JSON.parse(row.payload) as WorkspaceState : emptyWorkspace());
     const next = updater(state); const payload = JSON.stringify(next);
     // Leave room for the owner key and other fields within D1's 2 MB row limit.
     if (new TextEncoder().encode(payload).byteLength > 1_800_000) throw new WorkspaceError("This prototype workspace has reached its record limit. Export existing records; additional capacity needs a database upgrade.", 413);

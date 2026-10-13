@@ -5,10 +5,14 @@ const owner=`qa-${crypto.randomUUID()}`;
 const identity={'oai-authenticated-user-id':owner,'oai-authenticated-user-email':'qa@sites.test'};
 async function request(path,method='GET',body,auth=identity){const r=await fetch(base+path,{method,headers:{...auth,...(body&&!(body instanceof FormData)?{'content-type':'application/json'}:{})},body:body instanceof FormData?body:body?JSON.stringify(body):undefined});return {r,data:r.headers.get('content-type')?.includes('application/json')?await r.json():await r.text()};}
 const unauth=await request('/api/workspace','GET',undefined,{});assert.equal(unauth.r.status,200);assert.ok(unauth.r.headers.get('set-cookie')?.includes('HttpOnly'));
-const empty=await request('/api/workspace');assert.equal(empty.data.state.submissions.length,0);
-const created=await request('/api/tests','POST',{title:'QA-only method marks',guideText:'Q1: f(x)=x²; f\'(x)=2x. Award 1 for method, 1 for result. Q2: solve 2x=6; x=3. One mark.',questions:[{id:'Q1',topic:'Derivative',maxMarks:2,criteria:'1 method + 1 result'},{id:'Q2',topic:'Equation',maxMarks:1,criteria:'x=3'}]});assert.equal(created.r.status,201);const test=created.data.state.tests.find(t=>t.title==='QA-only method marks');
+const empty=await request('/api/workspace');assert.equal(empty.data.state.submissions.length,0);assert.equal(empty.data.state.tests.length,0,'Fresh workspaces must not receive a default rubric');
+const rubric={title:'QA-only method marks',rubricAttachmentNames:['qa-uploaded-rubric.pdf'],markIncrement:1,guideText:'Q1: f(x)=x²; f\'(x)=2x. Award 1 for method, 1 for result. Q2: solve 2x=6; x=3. One mark.',questions:[{id:'Q1',topic:'Derivative',maxMarks:2,criteria:'1 method + 1 result'},{id:'Q2',topic:'Equation',maxMarks:1,criteria:'x=3'}]};
+const missingRubric=await request('/api/tests','POST',{...rubric,rubricAttachmentNames:[]});assert.equal(missingRubric.r.status,400);assert.match(missingRubric.data.error,/Upload the marking rubric/);
+const created=await request('/api/tests','POST',rubric);assert.equal(created.r.status,201);const test=created.data.state.tests.find(t=>t.title==='QA-only method marks');assert.deepEqual(test.rubricAttachmentNames,rubric.rubricAttachmentNames);
+const partial=await request('/api/tests','POST',{...rubric,title:'QA-only incomplete rubric',questions:[...rubric.questions,{id:'Q3',topic:'Functions',maxMarks:1,criteria:'Uploaded third criterion'}]});assert.equal(partial.r.status,201);const partialTest=partial.data.state.tests.find(t=>t.title==='QA-only incomplete rubric');
+const mismatch=await request('/api/chat-submissions','POST',{testId:partialTest.id,studentName:'QA rejected paper',date:'2026-10-13',chatAttachmentNames:['qa-full-nine-question-paper.pdf'],paperQuestionIds:Array.from({length:9},(_,index)=>`Q${index+1}`)});assert.equal(mismatch.r.status,400);assert.match(mismatch.data.error,/Missing from rubric: Q4, Q5, Q6, Q7, Q8, Q9/);
 const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
-const form=new FormData();form.append('testId',test.id);form.append('studentName','QA synthetic record');form.append('date','2026-10-13');form.append('files',new Blob([Buffer.from(png,'base64')],{type:'image/png'}),'qa-fixture.png');
+const form=new FormData();form.append('testId',test.id);form.append('studentName','QA synthetic record');form.append('date','2026-10-13');form.append('paperQuestionIds',JSON.stringify(['Q1','Q2']));form.append('files',new Blob([Buffer.from(png,'base64')],{type:'image/png'}),'qa-fixture.png');
 const uploaded=await request('/api/submissions','POST',form);assert.equal(uploaded.r.status,201);let s=uploaded.data.submission;
 const unresolved=await request(`/api/submissions/${s.id}/approve`,'POST',{expectedRevision:s.revision});assert.equal(unresolved.r.status,400);
 const rows=[{questionId:'Q1',awardedMarks:1,status:'wrong',evidence:'QA synthetic evidence: method shown; final result incorrect.',reason:'One method mark.',tutorNote:'Review final derivative.'},{questionId:'Q2',awardedMarks:0,status:'blank',evidence:'QA synthetic answer absent.',reason:'Not attempted.',tutorNote:''}];
@@ -19,7 +23,8 @@ const approved=await request(`/api/submissions/${s.id}/approve`,'POST',{expected
 const csv=await request('/api/export?kind=marking');assert.equal(csv.data.split('\r\n').filter(Boolean).length,3);
 const photo=await request(`/api/files/${s.files[0].id}`);assert.equal(photo.r.status,200);
 const other=await request(`/api/files/${s.files[0].id}`,'GET',undefined,{'oai-authenticated-user-id':'qa-other','oai-authenticated-user-email':'other@sites.test'});assert.equal(other.r.status,404);
-const chat=await request('/api/chat-submissions','POST',{testId:test.id,studentName:'QA chat-only alias',date:'2026-10-13',chatAttachmentNames:['paper1.jpg']});assert.equal(chat.r.status,201);assert.equal(chat.data.submission.inputSource,'chat');assert.equal(chat.data.submission.files.length,0);
+const missingCoverage=await request('/api/chat-submissions','POST',{testId:test.id,studentName:'QA rejected missing coverage',date:'2026-10-13',chatAttachmentNames:['paper1.jpg']});assert.equal(missingCoverage.r.status,400);
+const chat=await request('/api/chat-submissions','POST',{testId:test.id,studentName:'QA chat-only alias',date:'2026-10-13',chatAttachmentNames:['paper1.jpg'],paperQuestionIds:['Q1','Q2']});assert.equal(chat.r.status,201);assert.equal(chat.data.submission.inputSource,'chat');assert.equal(chat.data.submission.files.length,0);assert.deepEqual(chat.data.submission.paperQuestionIds,['Q1','Q2']);
 const activity=await request('/api/activities','POST',{date:'2026-10-13',type:'qa',studentName:'QA synthetic record',count:1,notes:'QA fixture support'});assert.equal(activity.r.status,201);
 const brief=await request('/api/briefs','POST',{submissionId:s.id,audience:'student',date:'2026-10-13',text:'QA fixture draft: Q1 earned 1/2.',evidenceRefs:[`${s.id}:Q1`],sourceRevisions:{[s.id]:s.revision}});assert.equal(brief.r.status,201);
 let rpcId=0;
@@ -27,6 +32,9 @@ async function rpc(method,params,auth=identity){return request('/mcp','POST',{js
 const init=await rpc('initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'qa',version:'1'}});assert.ok(init.data.result.capabilities.tools);assert.equal(init.data.result.serverInfo.title,'MyTalent Education');
 const list=await rpc('tools/list',{});assert.ok(list.data.result.tools.find(t=>t.name==='open_tutor_workspace')._meta['openai/ui'].entrypoints.some(e=>e.type==='global'));
 assert.deepEqual(list.data.result.tools.find(t=>t.name==='create_test').inputSchema.properties.markIncrement.enum,[0.5,1]);
+assert.ok(list.data.result.tools.find(t=>t.name==='create_test').inputSchema.required.includes('rubricAttachmentNames'));
+assert.ok(list.data.result.tools.find(t=>t.name==='create_test').inputSchema.required.includes('markIncrement'));
+assert.ok(list.data.result.tools.find(t=>t.name==='create_chat_submission').inputSchema.required.includes('paperQuestionIds'));
 assert.equal(list.data.result.tools.find(t=>t.name==='get_admin_records').annotations.readOnlyHint,true);
 const records=await rpc('tools/call',{name:'get_admin_records',arguments:{}});
 const exhibits=records.data.result.structuredContent.exhibits;
@@ -41,5 +49,5 @@ const denied=await rpc('tools/call',{name:'get_workspace',arguments:{}},{});asse
 const modelSave=await rpc('tools/call',{name:'save_marking_draft',arguments:{submissionId:s.id,expectedRevision:s.revision,questions:rows}});assert.equal(modelSave.data.result.structuredContent.status,409);
 assert.equal(modelSave.data.result.isError,true);
 const missingStudent=await rpc('tools/call',{name:'get_conversation_evidence',arguments:{audience:'student'}});assert.equal(missingStudent.data.result.isError,true);
-console.log('Passed local Worker flow: identity, uploads/ownership, partial marks, review gate, revision conflicts, approved-only CSV and Exhibits 1–3, chat references, activities, saved briefs, MCP discovery/resource and actual photo bytes.');
+console.log('Passed local Worker flow: no default rubric, uploaded-rubric provenance, full-paper coverage gate, identity, uploads/ownership, partial marks, review gate, revision conflicts, approved-only CSV and Exhibits 1–3, chat references, activities, saved briefs, MCP discovery/resource and actual photo bytes.');
 console.log(`QA records are isolated under ${owner}; no tutor workspace records were changed.`);

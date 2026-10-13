@@ -27,10 +27,30 @@ export function validateRevision(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw new WorkspaceError("expectedRevision must be a non-negative integer.");
   return value;
 }
+function rubricAttachments(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) throw new WorkspaceError("Upload the marking rubric for the complete paper and start a new marking workflow. Record between 1 and 20 actual rubric attachment names; a default or saved guide alone is not sufficient.");
+  const names = value.map(name => text(name, "Uploaded rubric attachment name", 240));
+  if (new Set(names).size !== names.length) throw new WorkspaceError("Use unique uploaded rubric attachment names.");
+  return names;
+}
+function paperCoverage(test: Test, value: unknown): string[] {
+  rubricAttachments(test.rubricAttachmentNames);
+  if (test.markIncrement !== 0.5 && test.markIncrement !== 1) throw new WorkspaceError("Upload the complete marking rubric and start a new marking workflow with its explicit mark increment.");
+  if (!Array.isArray(value) || value.length === 0 || value.length > 60) throw new WorkspaceError("Upload every page of the complete student paper and its rubric, then start a new marking workflow. Record all observed paper question and subpart IDs (1 to 60).");
+  const ids = value.map(id => text(id, "Observed paper question or subpart ID", 40));
+  if (new Set(ids).size !== ids.length) throw new WorkspaceError("Observed paper question and subpart IDs must be unique.");
+  const rubricIds = new Set(test.questions.map(question => question.id));
+  const paperIds = new Set(ids);
+  const missingRubric = ids.filter(id => !rubricIds.has(id));
+  const absentFromPaper = [...rubricIds].filter(id => !paperIds.has(id));
+  if (missingRubric.length || absentFromPaper.length) throw new WorkspaceError(`The uploaded rubric must match the complete paper, including every question and subpart.${missingRubric.length ? ` Missing from rubric: ${missingRubric.join(", ")}.` : ""}${absentFromPaper.length ? ` Not found in the observed paper: ${absentFromPaper.join(", ")}.` : ""} Upload the complete matching materials and start a new marking workflow.`);
+  return ids;
+}
 export function makeTest(input: unknown, id: string, createdAt: string): Test {
   const value = object(input);
-  const markIncrement = value.markIncrement ?? 0.5;
-  if (markIncrement !== 0.5 && markIncrement !== 1) throw new WorkspaceError("Mark increment must be 0.5 or 1.");
+  const rubricAttachmentNames = rubricAttachments(value.rubricAttachmentNames);
+  const markIncrement = value.markIncrement;
+  if (markIncrement !== 0.5 && markIncrement !== 1) throw new WorkspaceError("Provide the uploaded rubric's mark increment: 0.5 or 1. No default mark increment is assumed.");
   if (!Array.isArray(value.questions) || !value.questions.length || value.questions.length > 60) throw new WorkspaceError("Provide between 1 and 60 questions.");
   const ids = new Set<string>();
   const questions = value.questions.map(item => {
@@ -40,13 +60,14 @@ export function makeTest(input: unknown, id: string, createdAt: string): Test {
     if (typeof question.maxMarks !== "number" || !Number.isFinite(question.maxMarks) || question.maxMarks <= 0 || question.maxMarks > 100 || question.maxMarks % markIncrement !== 0) throw new WorkspaceError(`Maximum marks must be a positive number in ${markIncrement}-mark increments, at most 100.`);
     return { id: questionId, topic: text(question.topic, "Topic", 120), maxMarks: question.maxMarks, criteria: text(question.criteria, "Marking criteria", 6000) };
   });
-  return { id, title: text(value.title, "Test title", 160), guideText: text(value.guideText, "Worked solutions and guide", 120000), questions, markIncrement, createdAt };
+  return { id, title: text(value.title, "Test title", 160), guideText: text(value.guideText, "Worked solutions and guide", 120000), questions, rubricAttachmentNames, markIncrement, createdAt };
 }
 export function makeSubmission(state: WorkspaceState, input: CreateSubmissionInput, id: string, createdAt: string): Submission {
   const test = state.tests.find(item => item.id === input.testId);
   if (!test) throw new WorkspaceError("Test not found.", 404);
   if (!Array.isArray(input.files) || input.files.length === 0 || input.files.length > 20) throw new WorkspaceError("Upload between 1 and 20 pages or PDFs.");
-  return { id, testId: test.id, studentName: text(input.studentName, "Student name or alias", 100), date: validateDate(input.date), files: input.files, inputSource: "workspace", questions: test.questions.map(q => ({ questionId: q.id, awardedMarks: null, status: "review", evidence: "", reason: "", tutorNote: "" })), status: "awaiting_marking", revision: 0, createdAt };
+  const paperQuestionIds = paperCoverage(test, input.paperQuestionIds);
+  return { id, testId: test.id, studentName: text(input.studentName, "Student name or alias", 100), date: validateDate(input.date), files: input.files, inputSource: "workspace", paperQuestionIds, questions: test.questions.map(q => ({ questionId: q.id, awardedMarks: null, status: "review", evidence: "", reason: "", tutorNote: "" })), status: "awaiting_marking", revision: 0, createdAt };
 }
 export function makeChatSubmission(state: WorkspaceState, input: unknown, id: string, createdAt: string): Submission {
   const value = object(input); const testId = text(value.testId, "Test ID", 100);
@@ -55,7 +76,8 @@ export function makeChatSubmission(state: WorkspaceState, input: unknown, id: st
   if (!Array.isArray(value.chatAttachmentNames) || value.chatAttachmentNames.length === 0 || value.chatAttachmentNames.length > 20) throw new WorkspaceError("List between 1 and 20 attachment names from the current conversation.");
   const chatAttachmentNames = value.chatAttachmentNames.map(name => text(name, "Chat attachment name", 240));
   if (new Set(chatAttachmentNames).size !== chatAttachmentNames.length) throw new WorkspaceError("Use unique attachment names so the tutor can identify each page.");
-  return { id, testId, studentName: text(value.studentName, "Student name or alias", 100), date: validateDate(value.date), files: [], inputSource: "chat", chatAttachmentNames, questions: test.questions.map(q => ({ questionId: q.id, awardedMarks: null, status: "review", evidence: "", reason: "", tutorNote: "" })), status: "awaiting_marking", revision: 0, createdAt };
+  const paperQuestionIds = paperCoverage(test, value.paperQuestionIds);
+  return { id, testId, studentName: text(value.studentName, "Student name or alias", 100), date: validateDate(value.date), files: [], inputSource: "chat", chatAttachmentNames, paperQuestionIds, questions: test.questions.map(q => ({ questionId: q.id, awardedMarks: null, status: "review", evidence: "", reason: "", tutorNote: "" })), status: "awaiting_marking", revision: 0, createdAt };
 }
 export function findSubmission(state: WorkspaceState, id: string): Submission {
   const result = state.submissions.find(item => item.id === id);
@@ -92,12 +114,14 @@ function revisionCheck(submission: Submission, revision: unknown): void {
 export function draftMarking(state: WorkspaceState, id: string, questions: unknown, expectedRevision: unknown): WorkspaceState {
   const submission = findSubmission(state, id); revisionCheck(submission, expectedRevision);
   const test = state.tests.find(item => item.id === submission.testId)!;
+  paperCoverage(test, submission.paperQuestionIds);
   const updated: Submission = { ...submission, status: "draft", questions: validateQuestionMarks(test, questions), revision: submission.revision + 1 };
   return { ...state, submissions: state.submissions.map(item => item.id === id ? updated : item) };
 }
 export function approveMarking(state: WorkspaceState, id: string, expectedRevision: unknown, approvedAt: string): WorkspaceState {
   const submission = findSubmission(state, id); revisionCheck(submission, expectedRevision);
   const test = state.tests.find(item => item.id === submission.testId)!;
+  paperCoverage(test, submission.paperQuestionIds);
   const updated: Submission = { ...submission, status: "approved", questions: validateQuestionMarks(test, submission.questions, true), revision: submission.revision + 1, approvedAt };
   return { ...state, submissions: state.submissions.map(item => item.id === id ? updated : item) };
 }

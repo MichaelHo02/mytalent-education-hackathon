@@ -1,29 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowRight, Check, Copy, Download, FileCheck2, FileImage, LoaderCircle, RefreshCw } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Copy, Download, FileCheck2, FileImage, LoaderCircle, Plus, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { calendarDate, generateBriefs, generateExhibits, today } from "@/lib/domain";
-import { adminPrompt, briefPrompt, downloadFile, finishPrompt, isMcpApp, markingPrompt, requestApi, uploadPrompt } from "@/lib/host-bridge";
-import type { SavedBrief, Submission, SubmissionFile, Test, WorkspaceState } from "@/lib/types";
+import { calendarDate, generateBriefs, today, validateQuestionMarks } from "@/lib/domain";
+import { getFreshFeedback } from "@/lib/report-feedback";
+import { adminPrompt, downloadFile, finishPrompt, isMcpApp, markingPrompt, requestApi, uploadPrompt } from "@/lib/host-bridge";
+import type { MarkStatus, QuestionMark, SavedBrief, Submission, SubmissionFile, Test, WorkspaceState } from "@/lib/types";
 
-type View = "mark" | "daily" | "briefs";
-type Audience = "student" | "parent" | "manager";
 type ResponseData = { state: WorkspaceState; submission?: Submission; error?: string };
 const emptyState: WorkspaceState = { tests: [], submissions: [], activities: [], followups: [] };
-const statusLabels = { awaiting_marking: "Awaiting marking", draft: "Needs review", approved: "Approved" };
-const resultLabels = { correct: "Correct", wrong: "Incorrect", careless: "Careless error", blank: "Not attempted", review: "Needs review" };
-const activityLabels = { attendance: "Attendance", qa: "Student Q&A", parent_contact: "Parent contact", sac_support: "SAC support" };
+const statusLabels = { awaiting_marking: "Codex is marking", draft: "Ready for review", approved: "Approved" };
+const resultLabels: Record<MarkStatus, string> = { correct: "Correct", wrong: "Incorrect", careless: "Careless error", blank: "Not attempted", review: "Needs review" };
+const audiences = ["student", "parent", "manager"] as const;
+const audienceLabels = { student: "Student feedback", parent: "Parent talking points", manager: "Manager summary" };
 const pluginLink = "codex://plugins/plugin_asdk_app_sites_6a8a554913148191a4ecd150b050413d/app/open_tutor_workspace";
 function dateLabel(date: string) { return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(new Date(`${date.slice(0, 10)}T12:00:00Z`)); }
 function json(method: string, body: unknown): RequestInit { return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }; }
@@ -33,265 +30,258 @@ async function api(path: string, init?: RequestInit): Promise<ResponseData> {
   if (!response.ok) throw new Error(data.error ?? "Could not complete this request.");
   return data;
 }
-function Field({ label, children, help }: { label: string; children: ReactNode; help?: string }) {
-  return <Label className="field"><span>{label}</span>{children}{help && <span className="field-help">{help}</span>}</Label>;
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return <Label className="field"><span>{label}</span>{children}</Label>;
 }
-function Section({ title, description, children, action }: { title: string; description?: string; children: ReactNode; action?: ReactNode }) {
-  return <Card><CardHeader><div className="section-heading"><CardTitle>{title}</CardTitle>{action}</div>{description && <CardDescription>{description}</CardDescription>}</CardHeader><CardContent>{children}</CardContent></Card>;
+function Section({ title, description, children, action, className = "" }: { title: string; description?: string; children: ReactNode; action?: ReactNode; className?: string }) {
+  return <Card className={className}><CardHeader><div className="section-heading"><CardTitle>{title}</CardTitle>{action}</div>{description && <CardDescription>{description}</CardDescription>}</CardHeader><CardContent>{children}</CardContent></Card>;
 }
-function Empty({ children }: { children: ReactNode }) { return <p className="empty-text">{children}</p>; }
 function CodexIcon() {
-  // Codex application icon, sourced from the installed OpenAI desktop app.
   // eslint-disable-next-line @next/next/no-img-element
   return <img src="/codex-icon.png" alt="" width={20} height={20} className="codex-icon" />;
 }
-function AgentButton({ children, onClick, disabled }: { children: ReactNode; onClick: () => void; disabled?: boolean }) {
-  return <Button type="button" onClick={onClick} disabled={disabled}>{children}</Button>;
-}
+function errorText(error: unknown) { return error instanceof Error ? error.message : "Could not save the change."; }
 
 export default function Workspace() {
   const [state, setState] = useState<WorkspaceState>(emptyState);
-  const [view, setView] = useState<View>("mark");
+  const [selectedId, setSelectedId] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [selectedId, setSelectedId] = useState("");
-  const [audience, setAudience] = useState<Audience>("student");
-  const [briefId, setBriefId] = useState("");
-  const [reportDate, setReportDate] = useState(today);
-  const [pendingUntil, setPendingUntil] = useState(0);
-  const [sending, setSending] = useState(false);
+  const [hasEdits, setHasEdits] = useState(false);
+  const [feedbackError, setFeedbackError] = useState(false);
   const knownSubmissions = useRef<Set<string> | null>(null);
+  const startingRef = useRef(false);
+  const generation = useRef(0);
+  const refreshInFlight = useRef(false);
+  const approvalInFlight = useRef(false);
+  const [watchUntil, setWatchUntil] = useState(0);
 
   const refresh = useCallback(async () => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    const version = generation.current;
     try {
       const data = await api("/api/workspace");
-      const newSubmission = knownSubmissions.current && data.state.submissions.find(s => !knownSubmissions.current!.has(s.id));
+      if (version !== generation.current) return;
+      const newSubmission = knownSubmissions.current && [...data.state.submissions].reverse().find(s => !knownSubmissions.current!.has(s.id));
       knownSubmissions.current = new Set(data.state.submissions.map(s => s.id));
       setState(data.state);
-      setSelectedId(current => newSubmission?.id || (data.state.submissions.some(s => s.id === current) ? current : data.state.submissions[0]?.id || ""));
-    }
-    catch (err) { setError(err instanceof Error ? err.message : "Could not open your workspace."); }
-    finally { setLoading(false); }
+      if (startingRef.current && newSubmission) {
+        startingRef.current = false; setStarting(false); setSelectedId(newSubmission.id);
+      } else if (!startingRef.current) {
+        setSelectedId(current => data.state.submissions.some(s => s.id === current) ? current : data.state.submissions.at(-1)?.id || "");
+      }
+    } catch (err) { setError(errorText(err)); }
+    finally { refreshInFlight.current = false; setLoading(false); }
   }, []);
+
   useEffect(() => {
-    // Loading remote data updates React only after the awaited request completes.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
     const update = () => { void refresh(); };
     const status = (event: Event) => {
-      const detail = (event as CustomEvent<{ status: string; message?: string; prompt?: string }>).detail;
+      const detail = (event as CustomEvent<{ status: string; message?: string; prompt?: string; action?: string }>).detail;
       if (detail.status === "working") setSending(true);
       if (detail.status === "sent" || detail.status === "error") setSending(false);
-      if (detail.status === "error") setError(detail.message ?? "The conversation request failed.");
-      else if (detail.message) setNotice(detail.message);
+      if (detail.status === "error") {
+        setError(detail.message ?? "The Codex request failed.");
+        if (detail.action === "finish") setFeedbackError(true);
+      }
       if (detail.prompt) setPrompt(detail.prompt);
-      if (detail.status === "sent") { setPendingUntil(Date.now() + 120000); void refresh(); }
+      if (detail.status === "sent") { setWatchUntil(Date.now() + 15 * 60 * 1000); void refresh(); }
     };
     window.addEventListener("focus", update);
-    window.addEventListener("tutor:refresh", update);
+    document.addEventListener("visibilitychange", update);
     window.addEventListener("tutor:data-changed", update);
+    window.addEventListener("tutor:refresh", update);
     window.addEventListener("tutor:host-status", status);
     return () => {
       window.removeEventListener("focus", update);
-      window.removeEventListener("tutor:refresh", update);
+      document.removeEventListener("visibilitychange", update);
       window.removeEventListener("tutor:data-changed", update);
+      window.removeEventListener("tutor:refresh", update);
       window.removeEventListener("tutor:host-status", status);
     };
   }, [refresh]);
-  useEffect(() => {
-    if (!pendingUntil && !state.submissions.some(s => s.status === "awaiting_marking")) return;
-    const interval = setInterval(() => {
-      void refresh();
-      if (pendingUntil && Date.now() >= pendingUntil) setPendingUntil(0);
-    }, pendingUntil ? 5000 : 15000);
-    return () => clearInterval(interval);
-  }, [state.submissions, pendingUntil, refresh]);
 
-  async function mutate(path: string, init: RequestInit, message: string) {
+  useEffect(() => {
+    // Save tools are headless. Refresh this mounted page while the agent works.
+    const timer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      if (isMcpApp() || Date.now() < watchUntil) void refresh();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [refresh, watchUntil]);
+
+  async function mutate(path: string, init: RequestInit) {
+    generation.current++;
+    const data = await api(path, init);
+    generation.current++;
+    knownSubmissions.current = new Set(data.state.submissions.map(s => s.id));
+    setState(data.state);
+    return data;
+  }
+  function dispatchWorkflow(kind: "upload" | "grade" | "finish" | "admin", detail: { submissionId?: string; date?: string } = {}) {
+    setError(""); setPrompt(""); setNotice("");
+    if (kind === "finish") setFeedbackError(false);
+    const handled = !window.dispatchEvent(new CustomEvent(`tutor:${kind}`, { cancelable: true, detail }));
+    setWatchUntil(Date.now() + 15 * 60 * 1000);
+    if (!handled) {
+      setPrompt(kind === "upload" ? uploadPrompt() : kind === "finish" ? finishPrompt(detail.submissionId!, detail.date) : kind === "grade" ? markingPrompt(detail.submissionId!) : adminPrompt(detail.date));
+    }
+  }
+  function startWorkflow() {
+    startingRef.current = true; setStarting(true); setSelectedId(""); setHasEdits(false);
+    dispatchWorkflow("upload");
+  }
+  async function saveCorrections(submissionId: string, questions: QuestionMark[], expectedRevision: number) {
     setBusy(true); setError("");
-    try { const data = await api(path, init); setState(data.state); setNotice(message); return data; }
-    catch (err) { setError(err instanceof Error ? err.message : "Could not save the change."); throw err; }
+    try {
+      const data = await mutate(`/api/submissions/${submissionId}`, json("PATCH", { questions, expectedRevision }));
+      setNotice("Corrections saved.");
+      return data.state.submissions.find(s => s.id === submissionId)!;
+    } catch (err) { setError(errorText(err)); throw err; }
+    finally { setBusy(false); }
+  }
+  async function approve(submissionId: string, questions: QuestionMark[], revision: number, dirty: boolean) {
+    if (approvalInFlight.current) return;
+    approvalInFlight.current = true; setBusy(true); setError(""); setNotice("");
+    try {
+      if (dirty) {
+        const saved = await mutate(`/api/submissions/${submissionId}`, json("PATCH", { questions, expectedRevision: revision }));
+        revision = saved.state.submissions.find(s => s.id === submissionId)!.revision;
+      }
+      const data = await mutate(`/api/submissions/${submissionId}/approve`, json("POST", { expectedRevision: revision }));
+      const submission = data.state.submissions.find(s => s.id === submissionId)!;
+      setHasEdits(false);
+      dispatchWorkflow("finish", { submissionId, date: calendarDate(submission.approvedAt!) });
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); approvalInFlight.current = false; }
+  }
+  async function exportOutput(kind: "exhibits" | "feedback", submissionId: string, date: string) {
+    setBusy(true); setError("");
+    try {
+      await downloadFile(`/api/export?kind=${kind}&submissionId=${encodeURIComponent(submissionId)}&date=${date}`, kind === "exhibits" ? `MyTalent-Exhibits-1-2-3-${date}.xlsx` : `MyTalent-Feedback-${date}.html`);
+      setNotice(kind === "exhibits" ? "Exhibits 1–3 downloaded in one workbook." : "Feedback form downloaded. Open it to print or save as PDF.");
+    } catch (err) { setError(errorText(err)); }
     finally { setBusy(false); }
   }
   async function copy(text: string) {
     try { await navigator.clipboard.writeText(text); setNotice("Copied."); }
-    catch { setPrompt(text); setNotice("Select and copy the text below."); }
+    catch { setPrompt(text); }
   }
-  async function exportRecords(kind: string, date = reportDate) {
-    setError("");
-    try { await downloadFile(`/api/export?kind=${kind}&date=${date}`, `tutor-${kind}-${date}.csv`); setNotice("Spreadsheet export ready."); }
-    catch (err) { setError(err instanceof Error ? err.message : "Could not export the records."); }
-  }
-  function askCodex(submission: Submission, kind: "grade" | "brief", who?: Audience) {
-    const prepared = kind === "grade" ? markingPrompt(submission.id) : briefPrompt(submission.id, who ?? "student");
-    const handled = !window.dispatchEvent(new CustomEvent(`tutor:${kind}`, { cancelable: true, detail: { submissionId: submission.id, audience: who } }));
-    if (handled) setPendingUntil(Date.now() + 120000);
-    if (!handled) { setPrompt(prepared); setNotice("Copy this request into Codex. Attach the paper pages there if needed."); }
-  }
-  function askManagerBrief() {
-    const handled = !window.dispatchEvent(new CustomEvent("tutor:brief", { cancelable: true, detail: { audience: "manager", date: reportDate } }));
-    if (handled) setPendingUntil(Date.now() + 120000);
-    if (!handled) { setPrompt(briefPrompt(undefined, "manager", reportDate)); setNotice("Copy this request into Codex to refine the manager summary."); }
-  }
-  function startWorkflow(kind: "upload" | "admin") {
-    const detail = kind === "upload" ? {} : { date: reportDate };
-    const handled = !window.dispatchEvent(new CustomEvent(`tutor:${kind}`, { cancelable: true, detail }));
-    if (handled) setPendingUntil(Date.now() + 120000);
-    else {
-      setPrompt(kind === "upload" ? uploadPrompt() : adminPrompt(reportDate));
-      setNotice("Open this plugin in Codex to run the workflow, or copy the request into your conversation.");
-    }
-  }
-  function finishWorkflow(submissionId: string, date = reportDate) {
-    const handled = !window.dispatchEvent(new CustomEvent("tutor:finish", { cancelable: true, detail: { submissionId, date } }));
-    if (handled) setPendingUntil(Date.now() + 120000);
-    else { setPrompt(finishPrompt(submissionId, date)); setNotice("Your records are ready. Continue in Codex to prepare the feedback."); }
-  }
+
   const selected = state.submissions.find(s => s.id === selectedId);
-  const approved = state.submissions.filter(s => s.status === "approved");
-  const derived = generateBriefs(state, reportDate);
-  const brief = derived.student.find(b => b.submissionId === briefId) ?? derived.student[0];
-  const currentBriefSubmission = approved.find(s => s.id === brief?.submissionId);
-  const savedBrief = state.briefs?.filter(b => b.audience === audience && (audience === "manager" ? b.date === reportDate : b.submissionId === brief?.submissionId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const test = state.tests.find(t => t.id === selected?.testId);
+  const feedback = selected ? getFreshFeedback(state, selected.id) : null;
+  const isApproved = selected?.status === "approved";
+  const phase = !selected || starting ? 1 : isApproved ? 3 : 2;
+  const daily = generateBriefs(state).manager;
 
   return <div className="tutor-app">
     <a href="#main" className="skip-link">Skip to workspace</a>
     <header className="app-header"><div className="app-brand">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src="/mytalent-logo.png" alt="" width={42} height={34} className="brand-logo" />
-      <div><h1>MyTalent Education</h1><p>Tutor workspace</p></div>
-    </div><Button variant="ghost" size="icon" type="button" aria-label="Refresh workspace" onClick={() => { setError(""); void refresh(); }}><RefreshCw className={loading ? "animate-spin" : ""} /></Button></header>
-    <main id="main">
-      {!isMcpApp() && <p className="site-host-help">Public demo · For guided marking, open MyTalent Education in the Codex sidebar.</p>}
-      {error && <Alert variant="destructive" className="status-alert" role="alert"><AlertDescription>{error}</AlertDescription></Alert>}
-      {notice && <Alert className="status-alert" role="status"><Check /><AlertDescription>{notice}</AlertDescription><Button variant="ghost" size="sm" className="dismiss-notice" type="button" onClick={() => setNotice("")}>Dismiss</Button></Alert>}
-      {prompt && <Card className="prompt-card"><CardHeader><CardTitle>Continue in Codex</CardTitle><CardDescription>Use the MyTalent Education plugin in Codex, then attach your paper photos. This browser cannot start a Codex turn.</CardDescription></CardHeader><CardContent><Textarea aria-label="Prepared Codex request" value={prompt} readOnly rows={5} /><div className="actions"><Button type="button" onClick={() => void copy(prompt)}><Copy />Copy request</Button><Button asChild variant="outline"><a href={pluginLink}>Open in Codex<ArrowRight /></a></Button><Button variant="ghost" type="button" onClick={() => setPrompt("")}>Close</Button></div></CardContent></Card>}
-      <Tabs value={view} onValueChange={value => { setView(value as View); setPrompt(""); }}>
-        <TabsList className="main-tabs"><TabsTrigger value="mark">Student work</TabsTrigger><TabsTrigger value="briefs">Records & feedback</TabsTrigger><TabsTrigger value="daily">Daily log</TabsTrigger></TabsList>
-        {loading ? <div className="loading" role="status"><LoaderCircle className="animate-spin" />Opening workspace…</div> : <>
-          <TabsContent value="mark" className="tab-content">
-            <div className="start-panel">
-              <div className="start-icon"><FileImage size={22} /></div>
-              <h2>From paper to progress.</h2>
-              <p>Upload student work in Codex. Review the marks.<br />Your records and feedback follow.</p>
-              <AgentButton onClick={() => startWorkflow("upload")} disabled={busy || sending}><CodexIcon />Mark student work with Codex<ArrowRight /></AgentButton>
-              <span className="start-hint">Photos or PDF · Include a rubric if you have one</span>
-            </div>
-            {!state.submissions.length && <>
-              <ol className="workflow-steps"><li><span>1</span><div><strong>Upload</strong><small>Codex guides you through the photos and rubric.</small></div></li><li><span>2</span><div><strong>Review</strong><small>Check suggested marks and any unclear answers.</small></div></li><li><span>3</span><div><strong>Ready</strong><small>Approve once. Get Exhibits 1–3 and feedback.</small></div></li></ol>
-              <div className="work-empty"><FileCheck2 size={19} /><p>Your students’ work will appear here.</p></div>
-            </>}
-            {state.submissions.length > 0 && <div className="work-section">
-              <div className="list-heading"><h2>Student work</h2><Badge variant="secondary">{state.submissions.length}</Badge></div>
-              <div className="paper-list">{state.submissions.map(submission => <Button variant={selectedId === submission.id ? "secondary" : "ghost"} className="paper-list-button" key={submission.id} type="button" onClick={() => setSelectedId(submission.id)}><Avatar className="paper-avatar"><AvatarFallback>{submission.studentName.split(/\s+/).slice(0, 2).map(part => part[0]).join("").toUpperCase()}</AvatarFallback></Avatar><span className="paper-info"><strong>{submission.studentName}</strong><small>{state.tests.find(test => test.id === submission.testId)?.title}</small></span><Badge variant="outline">{statusLabels[submission.status]}</Badge></Button>)}</div>
-            </div>}
-            {selected && <MarkingReview key={`${selected.id}-${selected.revision}`} submission={selected} test={state.tests.find(test => test.id === selected.testId)} busy={busy || sending} onAsk={() => askCodex(selected, "grade")} onApprove={async () => {
-              const result = await mutate(`/api/submissions/${selected.id}/approve`, json("POST", { expectedRevision: selected.revision }), "Approved. Exhibits 1–3 are ready; Codex can now prepare your feedback.");
-              const approvedAt = result?.state.submissions.find(s => s.id === selected.id)?.approvedAt;
-              const date = approvedAt ? calendarDate(approvedAt) : today();
-              setReportDate(date); setBriefId(selected.id); setView("briefs"); finishWorkflow(selected.id, date);
-            }} onBrief={() => { setBriefId(selected.id); setView("briefs"); }} />}
-          </TabsContent>
-          <TabsContent value="daily" className="tab-content">
-            <div className="daily-toolbar"><Field label="Reporting date"><Input type="date" name="reportDate" value={reportDate} onChange={e => setReportDate(e.target.value || today())} required /></Field><Button type="button" variant="outline" onClick={() => void exportRecords("daily")}><Download />Export daily report</Button></div>
-            <Section title="Update your daily log" description="Tell Codex about today’s support, parent contacts and follow-ups.">
-              <AgentButton onClick={() => startWorkflow("admin")} disabled={busy || sending}><CodexIcon />Update log with Codex</AgentButton>
+      <div><h1>MyTalent Education</h1><p>Marking, made simpler.</p></div>
+    </div><Button variant="ghost" size="icon" aria-label="Refresh workspace" onClick={() => { setError(""); void refresh(); }}><RefreshCw className={loading ? "animate-spin" : ""} /></Button></header>
+    <main id="main" className="workflow-page">
+      <ol className="journey" aria-label="Marking workflow">{["Upload", "Review", "Ready"].map((label, index) => <li key={label} className={phase === index + 1 ? "active" : phase > index + 1 ? "complete" : ""} aria-current={phase === index + 1 ? "step" : undefined}><span>{phase > index + 1 ? <Check size={12} /> : index + 1}</span>{label}</li>)}</ol>
+      {error && <Alert variant="destructive" role="alert"><AlertDescription>{error}</AlertDescription></Alert>}
+      {notice && <p className="inline-notice" role="status"><Check size={14} />{notice}</p>}
+      {prompt && <Section title="Continue in Codex" description="Open MyTalent in Codex and attach the student’s paper and marking rubric there."><div className="actions"><Button asChild><a href={pluginLink}><CodexIcon />Open in Codex<ArrowRight /></a></Button><Button variant="outline" onClick={() => void copy(prompt)}><Copy />Copy request</Button></div><details className="evidence-details"><summary>View request</summary><Textarea aria-label="Prepared Codex request" value={prompt} readOnly rows={5} /></details></Section>}
+      {loading ? <div className="loading" role="status"><LoaderCircle className="animate-spin" />Opening workspace…</div> : <>
+        {!selected && <section className="start-panel">
+          <div className="start-icon"><FileImage size={23} /></div>
+          <h2>{starting ? "Add your paper and rubric." : "You teach. Codex does the paperwork."}</h2>
+          <p>{starting ? "In the conversation, attach every page of the student’s work and the marking rubric. Codex will check the full paper and prepare the marks here." : "Upload the work and rubric in Codex. Review the marks here. Approve once for feedback and all three Exhibits."}</p>
+          {starting ? <div className="upload-wait" role="status"><LoaderCircle size={16} className="animate-spin" />Waiting for your files in Codex</div> : <Button onClick={startWorkflow} disabled={busy || sending}><CodexIcon />Mark student work with Codex<ArrowRight /></Button>}
+          <div className="required-files"><span><FileImage size={14} />All student work pages</span><span><FileCheck2 size={14} />Marking rubric required</span></div>
+          {starting && <Button variant="ghost" size="sm" onClick={() => { startingRef.current = false; setStarting(false); setSelectedId(state.submissions.at(-1)?.id || ""); }}>Back to saved work</Button>}
+        </section>}
+        {selected && <>
+          <div className="paper-toolbar"><div className="active-paper"><span className="eyebrow">CURRENT PAPER</span>{state.submissions.length > 1 ? <NativeSelect aria-label="Current student paper" value={selectedId} disabled={busy || hasEdits} onChange={e => { setSelectedId(e.target.value); setError(""); setNotice(""); }} >{[...state.submissions].reverse().map(s => <option key={s.id} value={s.id}>{s.studentName} · {state.tests.find(t => t.id === s.testId)?.title} · {statusLabels[s.status]}</option>)}</NativeSelect> : <strong>{selected.studentName}</strong>}</div><Button variant="outline" size="sm" onClick={startWorkflow} disabled={busy || sending || hasEdits}><Plus size={14} />New paper</Button></div>
+          {isApproved ? <div className="approval-banner"><span className="approval-icon"><Check size={18} /></span><div><strong>Marking approved</strong><p>{selected.studentName} · {test?.title} · {selected.questions.reduce((sum, q) => sum + (q.awardedMarks ?? 0), 0)}/{test?.questions.reduce((sum, q) => sum + q.maxMarks, 0)} marks</p></div></div> : <ReviewEditor key={selected.id} submission={selected} test={test} busy={busy || sending} onDirty={setHasEdits} onAsk={() => dispatchWorkflow("grade", { submissionId: selected.id })} onRestart={startWorkflow} onSave={(questions, revision) => saveCorrections(selected.id, questions, revision)} onApprove={(questions, revision, dirty) => approve(selected.id, questions, revision, dirty)} />}
+          {isApproved && feedback && <>
+            <Section title="Your feedback" description={feedback.complete ? "Prepared from the marks you approved. Read it here or download the form." : "Codex is preparing student, parent and manager feedback. This page updates automatically."} action={feedback.complete ? <Badge variant="secondary"><Check size={12} />Ready</Badge> : <LoaderCircle size={17} className="animate-spin" />}>
+              <div className="feedback-list">{audiences.map(audience => <FeedbackItem key={audience} title={audienceLabels[audience]} brief={feedback[audience]} open={audience === "student"} />)}</div>
+              <div className="actions"><Button disabled={!feedback.complete || busy} onClick={() => void exportOutput("feedback", selected.id, feedback.date)}><Download />Download feedback form</Button>{!feedback.complete && <Button variant="ghost" disabled={sending || busy} onClick={() => dispatchWorkflow("finish", { submissionId: selected.id, date: feedback.date })}>{feedbackError ? "Retry feedback" : "Resume preparation"}</Button>}</div>
             </Section>
-            <div className="daily-summary"><span><strong>{derived.manager.papersMarked}</strong> papers approved</span><span><strong>{derived.manager.activities.qa}</strong> Q&A</span><span><strong>{derived.manager.activities.parent_contact}</strong> parent contacts</span><span><strong>{derived.manager.activities.sac_support}</strong> SAC support</span></div>
-            <Section title="Recorded activity">{state.activities.some(activity => activity.date === reportDate) ? <Table><TableHeader><TableRow><TableHead>Activity</TableHead><TableHead>Student</TableHead><TableHead>Count</TableHead><TableHead>Notes</TableHead></TableRow></TableHeader><TableBody>{state.activities.filter(activity => activity.date === reportDate).map(activity => <TableRow key={activity.id}><TableCell>{activityLabels[activity.type]}</TableCell><TableCell>{activity.studentName || "—"}</TableCell><TableCell>{activity.count}</TableCell><TableCell className="wrap-cell">{activity.notes || "—"}</TableCell></TableRow>)}</TableBody></Table> : <Empty>No activity recorded for this date.</Empty>}</Section>
-            {state.followups.length > 0 && <Section title="Follow-ups"><div className="followup-list">{state.followups.map(followup => <Label key={followup.id} className="followup-row"><Input type="checkbox" name={`followup-${followup.id}`} checked={followup.done} disabled={busy} onChange={e => { void mutate(`/api/followups/${followup.id}`, json("PATCH", { done: e.target.checked }), "Follow-up updated.").catch(() => {}); }} /><span className={followup.done ? "completed" : ""}>{followup.task}<small>{followup.studentName} · Due {dateLabel(followup.dueDate)}</small></span></Label>)}</div></Section>}
-          </TabsContent>
-          <TabsContent value="briefs" className="tab-content">
-            <ExhibitRecords state={state} onExport={exportRecords} />
-            <Section title="Feedback & talking points" description="Student, parent and manager drafts from approved evidence.">
-              <div className="brief-controls"><Field label="Audience"><NativeSelect name="audience" value={audience} onChange={e => setAudience(e.target.value as Audience)}><option value="student">Student</option><option value="parent">Parent</option><option value="manager">Manager</option></NativeSelect></Field>{audience === "manager" ? <Field label="Reporting date"><Input type="date" name="briefDate" value={reportDate} onChange={e => setReportDate(e.target.value || today())} required /></Field> : <Field label="Approved result"><NativeSelect name="approvedResult" value={brief?.submissionId ?? ""} onChange={e => setBriefId(e.target.value)}>{!brief && <option value="">No approved results</option>}{derived.student.map(item => <option key={item.submissionId} value={item.submissionId}>{item.studentName} · {item.testTitle}</option>)}</NativeSelect></Field>}</div>
-              <div className="actions"><AgentButton disabled={busy || sending || (audience !== "manager" && !currentBriefSubmission)} onClick={() => { if (audience === "manager") askManagerBrief(); else if (currentBriefSubmission) askCodex(currentBriefSubmission, "brief", audience); }}><CodexIcon />Generate this brief</AgentButton>{currentBriefSubmission && <Button type="button" variant="outline" disabled={busy || sending} onClick={() => finishWorkflow(currentBriefSubmission.id)}>Prepare all feedback</Button>}</div>
+            <Section title="Exhibits 1, 2 & 3" description="Updated from approved marking. Download all three in one Excel workbook." action={<FileCheck2 size={18} className="muted-icon" />}>
+              <div className="output-list"><div><span>01</span><p><strong>Marking sheet</strong><small>Every question, outcome and supporting evidence</small></p><Check size={15} /></div><div><span>02</span><p><strong>Student progress</strong><small>Topic evidence from recorded work</small></p><Check size={15} /></div><div><span>03</span><p><strong>Exam statistics</strong><small>Approved scores and recorded attempts</small></p><Check size={15} /></div></div>
+              <div className="actions"><Button disabled={busy} onClick={() => void exportOutput("exhibits", selected.id, feedback.date)}><Download />Download all 3 Exhibits</Button></div>
+              <p className="scope-note">Progress reflects the supplied topics. Full-course mastery needs the course catalogue and tutor assessment.</p>
             </Section>
-            {savedBrief ? <SavedBriefCard brief={savedBrief} state={state} onCopy={copy} /> : <Section title="Your conversation brief"><Empty>{audience === "manager" ? "Generate a manager brief from the work in your daily log." : brief ? "Choose a student and generate a brief with Codex." : "Approve a paper first, then choose a student and generate a brief."}</Empty></Section>}
-            {(audience === "manager" || brief) && <details className="approved-sources"><summary>Approved evidence</summary><div className="manual-content">{audience === "manager" ? <ManagerEvidence state={state} date={reportDate} /> : brief && <Section title="Source results" description={`${brief.studentName} · ${brief.testTitle} · ${brief.score}/${brief.maxScore}`}><BriefList title="Criteria fully met" items={brief.strengths} empty="No fully met criteria recorded." /><BriefList title="Recorded next steps" items={brief.nextSteps} empty="No specific practice needs recorded." /><details className="evidence-details"><summary>Question evidence</summary><ul>{brief.evidence.map((item, index) => <li key={index}>{item}</li>)}</ul></details></Section>}</div></details>}
-            <p className="help-text">Review generated feedback before using it. Every performance statement should trace back to approved evidence. Nothing is sent to anyone.</p>
-          </TabsContent>
+            <details className="archive-details"><summary>View approved marks <ChevronDown size={14} /></summary><ApprovedMarks submission={selected} test={test} /></details>
+          </>}
         </>}
-      </Tabs>
+        {!selected && !starting && !state.submissions.length && <div className="empty-workflow"><span>1 click to start</span><span>Review & approve</span><span>Feedback + 3 Exhibits</span></div>}
+        {!selected && !starting && state.submissions.length > 0 && <Button variant="ghost" onClick={() => setSelectedId(state.submissions.at(-1)!.id)}>Return to saved work</Button>}
+        <details className="daily-details"><summary>Daily log <span>{daily.papersMarked} approved today</span><ChevronDown size={14} /></summary><p>Record support, contacts and follow-ups with Codex.</p><Button variant="outline" size="sm" disabled={sending || busy} onClick={() => dispatchWorkflow("admin", { date: today() })}><CodexIcon />Update daily log</Button></details>
+      </>}
     </main>
-    <footer className="app-footer"><span>Suggested by Codex. Approved by you.</span><span>Hackathon demo</span></footer>
+    <footer className="app-footer"><span>Prepared by Codex. Reviewed by you.</span><span>MyTalent</span></footer>
   </div>;
 }
 
-function MarkingReview({ submission, test, busy, onAsk, onApprove, onBrief }: { submission: Submission; test?: Test; busy: boolean; onAsk: () => void; onApprove: () => Promise<void>; onBrief: () => void }) {
-  const marks = submission.questions;
-  const [activeFile, setActiveFile] = useState(0);
-  const approved = submission.status === "approved";
-  const unresolved = marks.some(q => q.status === "review" || q.awardedMarks === null || (q.status !== "blank" && (!q.evidence.trim() || !q.reason.trim())));
-  const score = marks.reduce((n, q) => n + (q.awardedMarks ?? 0), 0);
-  const maxScore = test?.questions.reduce((n, q) => n + q.maxMarks, 0) ?? 0;
-  return <Section title="Review & approve" description={`${submission.studentName} · ${test?.title ?? "Test"}`} action={<Badge variant={approved ? "secondary" : "outline"}>{statusLabels[submission.status]}</Badge>}>
-    <div className="review-toolbar"><strong>{score} / {maxScore} marks</strong>{!approved && <AgentButton onClick={onAsk} disabled={busy}><CodexIcon />{submission.status === "awaiting_marking" ? "Mark with Codex" : "Revise with Codex"}</AgentButton>}</div>
-    <details className="paper-details"><summary>{submission.inputSource === "chat" ? "Original photos are in Codex" : "View paper & marking guide"}</summary>{submission.files.length ? <><div className="actions">{submission.files.map((f, i) => <Button type="button" size="sm" variant={activeFile === i ? "secondary" : "outline"} key={f.id} onClick={() => setActiveFile(i)}>Page {i + 1}</Button>)}</div><ProtectedFile key={submission.files[activeFile]?.id ?? submission.files[0].id} file={submission.files[activeFile] ?? submission.files[0]} /></> : <p className="help-text">{submission.inputSource === "chat" ? `Review the original pages in your conversation: ${submission.chatAttachmentNames?.join(", ")}. The workspace records the marking evidence; the photos stay in chat.` : "No paper pages are stored with this record."}</p>}<details className="evidence-details"><summary>Saved marking guide</summary><pre>{test?.guideText}</pre></details></details>
-    <div>
-      <div className="question-reviews">{marks.map((mark) => { const q = test?.questions.find(q => q.id === mark.questionId); return <div className={`question-review ${mark.status === "review" ? "needs-review" : ""}`} key={mark.questionId}>
-        <div className="question-heading"><div><strong>{mark.questionId}</strong><span>{q?.topic}</span></div><div className="mark-score"><strong>{mark.awardedMarks ?? "—"}</strong><span>/ {q?.maxMarks}</span></div></div>
-        <div className="question-result"><Badge variant="outline">{resultLabels[mark.status]}</Badge></div>
-        <p className="question-reason">{mark.reason || "Waiting for Codex to read the student’s work."}</p>
-        {mark.evidence && <p className="question-evidence">{mark.evidence}</p>}
-        <details className="question-edit"><summary>Marking criteria & notes</summary><p className="criterion">{q?.criteria}</p>{mark.tutorNote && <p className="question-evidence">Tutor note: {mark.tutorNote}</p>}</details>
-      </div>; })}</div>
-      <div className="actions">{approved ? <Button type="button" onClick={onBrief}>View records & feedback<ArrowRight /></Button> : <Button type="button" disabled={busy || unresolved || submission.status === "awaiting_marking"} onClick={() => { void onApprove().catch(() => {}); }}><Check />Approve & prepare records</Button>}</div><p className="help-text">{approved ? "Approved results are locked and included in exports." : unresolved ? "Ask Codex to resolve flagged answers before approving." : "Check each mark and its evidence. Ask Codex for corrections, or approve."}</p>
-    </div>
+function ReviewEditor({ submission, test, busy, onDirty, onAsk, onRestart, onSave, onApprove }: { submission: Submission; test?: Test; busy: boolean; onDirty: (dirty: boolean) => void; onAsk: () => void; onRestart: () => void; onSave: (questions: QuestionMark[], revision: number) => Promise<Submission>; onApprove: (questions: QuestionMark[], revision: number, dirty: boolean) => Promise<void> }) {
+  const [rows, setRows] = useState(() => structuredClone(submission.questions));
+  const [revision, setRevision] = useState(submission.revision);
+  const [dirty, setDirty] = useState(false);
+  const [savedMessage, setSavedMessage] = useState("");
+  const conflict = dirty && revision !== submission.revision;
+  useEffect(() => {
+    if (!dirty) { setRows(structuredClone(submission.questions)); setRevision(submission.revision); }
+  }, [submission.revision, submission.questions, dirty]);
+  useEffect(() => { onDirty(dirty); return () => onDirty(false); }, [dirty, onDirty]);
+  const hasUploadedRubric = Boolean(test?.rubricAttachmentNames?.length && submission.paperQuestionIds?.length);
+  const awaiting = submission.status === "awaiting_marking";
+  let approvalIssue = "";
+  try { if (test) validateQuestionMarks(test, rows, true); else approvalIssue = "The marking rubric is missing."; } catch (err) { approvalIssue = errorText(err); }
+  const score = rows.reduce((sum, row) => sum + (row.awardedMarks ?? 0), 0);
+  const maxScore = test?.questions.reduce((sum, q) => sum + q.maxMarks, 0) ?? 0;
+  function change(index: number, values: Partial<QuestionMark>) { setRows(current => current.map((row, i) => i === index ? { ...row, ...values } : row)); setDirty(true); setSavedMessage(""); }
+  async function save() {
+    try { const saved = await onSave(rows, revision); setRows(structuredClone(saved.questions)); setRevision(saved.revision); setDirty(false); setSavedMessage("Corrections saved."); } catch { /* Parent shows the request error. */ }
+  }
+  return <Section title={awaiting ? "Codex is marking your paper" : "Review the suggested marks"} description={`${submission.studentName} · ${test?.title ?? "Uploaded paper"}`} action={<Badge variant="outline">{statusLabels[submission.status]}</Badge>}>
+    {!hasUploadedRubric ? <div className="review-blocker"><p>This older record has no uploaded rubric or full-paper check. Start a new marking session with all work pages and the complete rubric.</p><Button onClick={onRestart} disabled={busy}><CodexIcon />Upload paper & rubric</Button></div> : awaiting ? <div className="marking-wait" role="status"><LoaderCircle className="animate-spin" size={18} /><p>Codex is checking every question against your rubric.<small>The draft will appear here automatically.</small></p><Button variant="ghost" size="sm" onClick={onAsk} disabled={busy}>Resume with Codex</Button></div> : <>
+      <div className="review-summary"><strong>{score}<span> / {maxScore}</span></strong><div><span>{rows.length} question parts</span><span>{dateLabel(submission.date)}</span></div></div>
+      <p className="review-intro">Check the marks and feedback below. Edit anything that needs correcting, then approve once.</p>
+      {conflict && <Alert variant="destructive" role="alert"><AlertDescription>Codex saved a newer draft while you were editing. Your edits are still here. Reload the latest marks before continuing.</AlertDescription><Button variant="outline" size="sm" onClick={() => { setDirty(false); setRows(structuredClone(submission.questions)); setRevision(submission.revision); }}>Load latest marks</Button></Alert>}
+      <div className="question-reviews">{rows.map((row, index) => { const question = test?.questions.find(q => q.id === row.questionId); return <article className={`question-review ${row.status === "review" ? "needs-review" : ""}`} key={row.questionId}>
+        <div className="question-heading"><div><strong>{row.questionId}</strong><span>{question?.topic}</span></div><Label className="mark-score"><span className="sr-only">{row.questionId} marks</span><Input type="number" aria-label={`${row.questionId} marks`} min={0} max={question?.maxMarks} step={test?.markIncrement ?? 1} value={row.awardedMarks ?? ""} disabled={busy || conflict} onChange={e => { const marks = e.target.value === "" ? null : Number(e.target.value); change(index, { awardedMarks: marks, status: marks === null ? "review" : marks === question?.maxMarks ? "correct" : row.status === "blank" && marks === 0 ? "blank" : row.status === "careless" ? "careless" : "wrong" }); }} /><span>/ {question?.maxMarks}</span></Label></div>
+        <div className="question-result"><NativeSelect aria-label={`${row.questionId} outcome`} value={row.status} disabled={busy || conflict} onChange={e => { const status = e.target.value as MarkStatus; change(index, { status, ...(status === "correct" ? { awardedMarks: question?.maxMarks ?? null } : status === "blank" ? { awardedMarks: 0 } : status === "review" ? { awardedMarks: null } : {}) }); }}>{Object.entries(resultLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</NativeSelect></div>
+        <Field label="Marking feedback"><Textarea aria-label={`${row.questionId} marking feedback`} rows={2} value={row.reason} disabled={busy || conflict} onChange={e => change(index, { reason: e.target.value })} /></Field>
+        <details className="question-edit"><summary>Evidence, criteria & next practice</summary><p className="criterion">{question?.criteria}</p><Field label="Evidence from the paper"><Textarea aria-label={`${row.questionId} evidence`} rows={2} value={row.evidence} disabled={busy || conflict} onChange={e => change(index, { evidence: e.target.value })} /></Field><Field label="Next practice / tutor note"><Textarea aria-label={`${row.questionId} next practice`} rows={2} value={row.tutorNote} disabled={busy || conflict} onChange={e => change(index, { tutorNote: e.target.value })} /></Field></details>
+      </article>; })}</div>
+      <div className="review-actions"><div><Button onClick={() => void onApprove(rows, revision, dirty)} disabled={busy || conflict || Boolean(approvalIssue)}>{busy ? <LoaderCircle className="animate-spin" /> : <Check />}Approve & prepare feedback</Button>{dirty && <Button variant="outline" onClick={() => void save()} disabled={busy || conflict}>Save corrections</Button>}</div><p role="status">{savedMessage || (approvalIssue ? approvalIssue : "Your corrections save with approval. Feedback and all 3 Exhibits follow automatically.")}</p></div>
+      <Button className="codex-revision" variant="ghost" size="sm" onClick={onAsk} disabled={busy || dirty}><CodexIcon />Ask Codex to revisit the marking</Button>
+    </>}
+    <PaperEvidence submission={submission} test={test} />
   </Section>;
 }
 
+function FeedbackItem({ title, brief, open }: { title: string; brief?: SavedBrief; open: boolean }) {
+  if (!brief) return <div className="feedback-pending"><span>{title}</span><span><LoaderCircle size={12} className="animate-spin" />Preparing</span></div>;
+  return <details className="feedback-item" open={open}><summary><span>{title}</span><span><Check size={13} />Ready<ChevronDown size={13} /></span></summary><p className="saved-brief-text">{brief.text}</p></details>;
+}
+function ApprovedMarks({ submission, test }: { submission: Submission; test?: Test }) {
+  return <div className="approved-marks">{submission.questions.map(q => <div key={q.questionId}><strong>{q.questionId} · {q.awardedMarks}/{test?.questions.find(question => question.id === q.questionId)?.maxMarks}</strong><p>{q.reason}</p>{q.tutorNote && <small>{q.tutorNote}</small>}</div>)}<PaperEvidence submission={submission} test={test} /></div>;
+}
+function PaperEvidence({ submission, test }: { submission: Submission; test?: Test }) {
+  const [activeFile, setActiveFile] = useState(0);
+  return <details className="paper-details"><summary>Paper & uploaded rubric</summary><p className="help-text">{submission.inputSource === "chat" ? `Original work stays in your conversation: ${submission.chatAttachmentNames?.join(", ") || "attached paper"}.` : "Original uploaded work."}</p>{test?.rubricAttachmentNames?.length ? <p className="help-text">Rubric: {test.rubricAttachmentNames.join(", ")}</p> : <p className="help-text">Historical record · uploaded rubric not recorded.</p>}{submission.files.length > 0 && <><div className="actions">{submission.files.map((file, i) => <Button size="sm" variant={activeFile === i ? "secondary" : "outline"} key={file.id} onClick={() => setActiveFile(i)}>Page {i + 1}</Button>)}</div><ProtectedFile key={submission.files[activeFile]?.id ?? submission.files[0].id} file={submission.files[activeFile] ?? submission.files[0]} /></>}<details className="evidence-details"><summary>Extracted marking criteria</summary><pre>{test?.guideText}</pre></details></details>;
+}
 function ProtectedFile({ file }: { file: SubmissionFile }) {
   const [url, setUrl] = useState(""); const [error, setError] = useState("");
-  useEffect(() => {
-    let objectUrl = ""; let cancelled = false;
-    void requestApi(`/api/files/${file.id}`).then(async response => { if (!response.ok) throw new Error("Could not open this page."); objectUrl = URL.createObjectURL(await response.blob()); if (!cancelled) setUrl(objectUrl); }).catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : "Could not load the page."); });
-    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [file.id]);
-  if (error) return <p className="form-error" role="alert">{error}</p>;
-  if (!url) return <p className="help-text" role="status">Opening paper…</p>;
-  // Uploaded paper blobs must render directly inside the embedded app.
+  useEffect(() => { let objectUrl = ""; let cancelled = false; void requestApi(`/api/files/${file.id}`).then(async response => { if (!response.ok) throw new Error("Could not open this page."); objectUrl = URL.createObjectURL(await response.blob()); if (!cancelled) setUrl(objectUrl); }).catch(err => { if (!cancelled) setError(errorText(err)); }); return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); }; }, [file.id]);
+  if (error) return <p className="form-error">{error}</p>;
+  if (!url) return <p className="help-text">Opening paper…</p>;
   // eslint-disable-next-line @next/next/no-img-element
-  return <div className="paper-preview">{file.mimeType === "application/pdf" ? <object data={url} type="application/pdf" aria-label={file.name}><Button type="button" variant="outline" onClick={() => void downloadFile(`/api/files/${file.id}`, file.name)}>Download PDF</Button></object> : <img src={url} alt={`Student paper: ${file.name}`} />}</div>;
-}
-
-function ExhibitRecords({ state, onExport }: { state: WorkspaceState; onExport: (kind: string) => Promise<void> }) {
-  const exhibits = generateExhibits(state);
-  const available = exhibits.exams.length > 0;
-  const items = [
-    { kind: "marking", title: "Marking sheet", detail: "Question results, syllabus points and evidence", count: exhibits.marking.length },
-    { kind: "progress", title: "Student progress", detail: "Topic evidence · mastery awaits tutor confirmation", count: exhibits.progress.length },
-    { kind: "exams", title: "Exam statistics", detail: "Scores and attempts recorded in this workspace", count: exhibits.exams.length },
-  ];
-  return <Section title="Your admin records" description={available ? "Updated together from approved marking. No re-entry needed." : "Approve student work to populate all three Exhibits."}>
-    <div className="exhibit-list">{items.map((item, index) => <div className="exhibit-row" key={item.kind}><span className="exhibit-number">{index + 1}</span><div><span className="eyebrow">EXHIBIT {index + 1}</span><h3>{item.title}</h3><p>{item.detail}</p></div><Button variant="ghost" size="icon" type="button" disabled={!available} aria-label={`Download Exhibit ${index + 1} CSV`} onClick={() => void onExport(item.kind)}><Download /></Button></div>)}</div>
-    {available && <details className="exhibit-preview"><summary>Preview approved records</summary>
-      <h3>Exhibit 1 · Marking</h3><div className="exhibit-preview-list">{exhibits.marking.map(row => <div key={`${row.submissionId}:${row.questionId}`}><span>{row.studentName} · {row.questionId}<small>{row.topic}</small></span><Badge variant="outline">{row.outcome} · {row.marks}/{row.maxMarks}</Badge></div>)}</div>
-      <h3>Exhibit 2 · Progress evidence</h3><p className="help-text">{exhibits.scope.progress}</p><div className="exhibit-preview-list">{exhibits.progress.map(row => <div key={`${row.studentName}:${row.topic}`}><span>{row.studentName} · {row.topic}<small>{row.mastery}</small></span><span>{row.percentage === null ? row.evidenceStatus : `${row.marks}/${row.maxMarks}`}</span></div>)}</div>
-      <h3>Exhibit 3 · Exam statistics</h3><p className="help-text">{exhibits.scope.exams}</p><div className="exhibit-preview-list">{exhibits.exams.map(row => <div key={row.submissionId}><span>{row.studentName}<small>{row.testTitle} · Recorded attempt {row.recordedAttempt}</small></span><strong>{row.percentage}%</strong></div>)}</div>
-    </details>}
-  </Section>;
-}
-
-function BriefList({ title, items, empty }: { title: string; items: string[]; empty?: string }) { return <div className="brief-section"><h3>{title}</h3>{items.length ? <ul>{items.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p className="help-text">{empty}</p>}</div>; }
-function ManagerEvidence({ state, date }: { state: WorkspaceState; date: string }) {
-  const brief = generateBriefs(state, date).manager;
-  const activities = state.activities.filter(activity => activity.date === date);
-  return <Section title="Recorded sources" description={dateLabel(date)}><BriefList title="Recorded work & follow-ups" items={brief.talkingPoints} /><details className="evidence-details"><summary>Activity notes</summary>{activities.length ? <ul>{activities.map(activity => <li key={activity.id}>{activityLabels[activity.type]} · {activity.studentName || "Activity"} · {activity.notes || "No note recorded."}</li>)}</ul> : <p className="help-text">No activity recorded for this date.</p>}</details></Section>;
-}
-
-function SavedBriefCard({ brief, state, onCopy }: { brief: SavedBrief; state: WorkspaceState; onCopy: (text: string) => Promise<void> }) {
-  return <Section title="Codex draft" description={`${brief.audience[0].toUpperCase() + brief.audience.slice(1)} brief · ${dateLabel(brief.date)}`} action={<Button type="button" size="sm" variant="outline" onClick={() => void onCopy(brief.text)}><Copy />Copy</Button>}>
-    <div className="saved-brief-text">{brief.text}</div>
-    <details className="evidence-details"><summary>Sources used · {brief.evidenceRefs.length} references</summary><ul>{brief.evidenceRefs.map(reference => {
-      const submission = state.submissions.find(item => item.id === reference || reference.startsWith(`${item.id}:`));
-      const question = submission?.questions.find(item => `${submission.id}:${item.questionId}` === reference);
-      const activity = state.activities.find(item => item.id === reference);
-      return <li key={reference}>{submission ? <><strong>{submission.studentName}{question ? ` · ${question.questionId}` : " · Approved result"}</strong>{question && <p>{question.evidence} {question.reason}</p>}</> : activity ? <><strong>{activityLabels[activity.type]} · {activity.date}</strong><p>{activity.studentName} · Count {activity.count} · {activity.notes}</p></> : <span>Saved source</span>}<code className="source-reference">{reference}</code></li>;
-    })}</ul><h3 className="source-revisions-title">Approved record versions</h3><ul>{Object.entries(brief.sourceRevisions).map(([id, revision]) => <li key={id}>{state.submissions.find(item => item.id === id)?.studentName ?? "Submission"} · revision {revision}<code className="source-reference">{id}</code></li>)}</ul></details>
-    <p className="help-text">Generated draft for tutor review. Sources and their saved versions are listed above.</p>
-  </Section>;
+  return <div className="paper-preview">{file.mimeType === "application/pdf" ? <object data={url} type="application/pdf" aria-label={file.name} /> : <img src={url} alt={`Student paper: ${file.name}`} />}</div>;
 }

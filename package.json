@@ -12,11 +12,14 @@
     "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "test": "node --experimental-transform-types --test lib/domain.test.mjs app/api/_shared.test.mjs lib/host-bridge.test.mjs app/mcp/route.test.mjs"
+    "test": "node --experimental-transform-types --test lib/domain.test.mjs app/api/_shared.test.mjs lib/host-bridge.test.mjs app/mcp/route.test.mjs lib/report-exports.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
     "@hookform/resolvers": "^5.7.1",
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1",
+    "@openai/mcp-extensions": "latest",
     "@shadcn/react": "^0.3.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
@@ -38,10 +41,8 @@
     "sonner": "^2.0.8",
     "tailwind-merge": "3.6.0",
     "vaul": "^1.1.2",
-    "zod": "^3.25.76",
-    "@openai/mcp-extensions": "latest",
-    "@modelcontextprotocol/ext-apps": "^1.7.5",
-    "@modelcontextprotocol/sdk": "^1"
+    "write-excel-file": "2.3.10",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
@@ -53,6 +54,7 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
+    "esbuild": "^0.27.0",
     "eslint": "9.39.4",
     "eslint-config-next": "16.3.4",
     "json-rpc-2.0": "1.7.1",
@@ -63,8 +65,7 @@
     "typescript": "5.9.3",
     "vinext": "1.0.0-beta.5",
     "vite": "8.0.13",
-    "wrangler": "4.92.0",
-    "esbuild": "^0.27.0"
+    "wrangler": "4.92.0"
   },
   "type": "module",
   "overrides": {

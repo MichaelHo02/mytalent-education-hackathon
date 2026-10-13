@@ -12,13 +12,17 @@ export async function POST(request: Request) {
     files.forEach(validateFile);
     const testId = form.get("testId"); const studentName = form.get("studentName"); const date = form.get("date");
     if (typeof testId !== "string" || typeof studentName !== "string" || typeof date !== "string") throw new WorkspaceError("Provide testId, studentName and date.");
+    let paperQuestionIds: unknown;
+    try { paperQuestionIds = JSON.parse(String(form.get("paperQuestionIds") ?? "")); }
+    catch { throw new WorkspaceError("Include the full paper question inventory before uploading."); }
+    if (!Array.isArray(paperQuestionIds) || paperQuestionIds.some(id => typeof id !== "string")) throw new WorkspaceError("paperQuestionIds must be a list of question IDs.");
     const state = await readWorkspace(user.userId);
     // Validate the record before storing any files; roll back stored pages if saving fails.
-    makeSubmission(state, { testId, studentName, date, files: files.map(file => ({ id: "pending", name: file.name, mimeType: file.type, size: file.size })) }, "pending", new Date().toISOString());
+    makeSubmission(state, { testId, studentName, date, paperQuestionIds, files: files.map(file => ({ id: "pending", name: file.name, mimeType: file.type, size: file.size })) }, "pending", new Date().toISOString());
     const uploaded: SubmissionFile[] = [];
     try {
       for (const file of files) uploaded.push(await uploadFile(user.userId, file));
-      const updated = await createSubmission(user.userId, { testId, studentName, date, files: uploaded });
+      const updated = await createSubmission(user.userId, { testId, studentName, date, paperQuestionIds, files: uploaded });
       return json({ state: updated, submission: updated.submissions.at(-1) }, 201);
     } catch (error) {
       await Promise.allSettled(uploaded.map(file => removeUploadedFile(user.userId, file.id)));
