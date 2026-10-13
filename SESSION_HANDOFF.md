@@ -8,9 +8,11 @@ The Site access policy is now **public**. Website guests remain separate from th
 
 Exhibit 1 has DONE/W/C/Blank, syllabus topics and evidence. Exhibit 2 aggregates topic evidence; no full course catalogue or confirmed mastery rubric was supplied, so it explicitly awaits tutor mastery confirmation. Exhibit 3 describes only attempts recorded in this workspace, not lifetime attempts or inferred pass/fail.
 
-The canonical plugin has the tutor-workflow skill uploaded through Plugin Creator, version 1.0.2. The backend reports the plugin already installed. Plugin catalogue presentation is owned by Sites and previously retained the old label Tutor Workspace; the MCP entrypoint and app UI are MyTalent Education. Never create a duplicate plugin. Verify deployment/catalogue refresh separately.
+The canonical plugin has the tutor-workflow skill uploaded through Plugin Creator, version 1.0.2. The backend reports the plugin already installed. Sites publication refreshed the canonical plugin display name to MyTalent Education; read-back confirmed the workflow skill and version 1.0.2 were preserved. Never create a duplicate plugin. The host reports it already installed; the user will reopen it and test the native flow.
 
-Validation: 28 unit/domain/SDK mock-host tests and TypeScript passed. The user explicitly volunteered to test the installed native app, so native messaging, attachment interpretation and live marking remain for their verification. Do not claim that full native flow has passed.
+Public version 2 deployed successfully from source commit 24ba3ecd73cc818f154e9301851ca58f58f7b747 at https://tutor-evidence-workspace.quick-scarf-1289.chatgpt.site. Anonymous /api/workspace returned a usable empty workspace and saved guide. MCP provisioning succeeded.
+
+Validation: 28 unit/domain/SDK mock-host tests, TypeScript and the built Worker integration (including Exhibits) passed. The user explicitly volunteered to test the installed native app, so native messaging, attachment interpretation and live marking remain for their verification. Do not claim that full native flow has passed.
 
 Source publication through the Sites helper makes its required deployment snapshot commit. No GitHub main merge is requested; the original main checkout is unchanged.
 
